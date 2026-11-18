@@ -1,2 +1,66 @@
-skills/
+# dependencies
 node_modules/
+bun.lock
+
+# next.js
+.next/
+out/
+build/
+.vercel/
+
+# env / local config
+.env
+.env.local
+.env.*.local
+
+# prisma / sqlite db
+db/
+*.db
+*.db-journal
+*.sqlite
+
+# logs
+dev.log
+server.log
+*.log
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/*
+
+# test artifacts
+coverage/
+tmp/
+render/
+
+# agent-browser state
+state.json
+
+# scripts artifacts
+!scripts/sample-notes/
+
+# z.ai scaffold internal scripts
+.zscripts/
+
+# preloaded skills / scaffold demos — not part of this project
+skills/
+examples/
+mini-services/
+tests/
+
+# user-uploaded source file
+upload/
+
+# next-env (regenerated on build)
+next-env.d.ts
+
+# Phase 1-4 portfolio subprojects (each has its own git repo)
+apps/
+
+# sandbox scripts
+scripts/finalize-phase*.sh
+scripts/push-all-projects.sh
+
+# agent context dir
+agent-ctx/
