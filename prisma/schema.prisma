@@ -1,0 +1,62 @@
+// Personal Knowledge Copilot — Prisma schema
+// SQLite is used as the local-first store. Embeddings are serialized as
+// JSON arrays of numbers in `NoteChunk.embedding` so we can compute cosine
+// similarity in app code without requiring sqlite-vec / pgvector extensions.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Note {
+  id        String   @id @default(cuid())
+  title     String
+  source    String   // "upload" | "paste" | "obsidian-export"
+  path      String?  // optional original file path (e.g. Obsidian vault path)
+  content   String   // raw markdown
+  wordCount Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  chunks NoteChunk[]
+}
+
+model NoteChunk {
+  id        String  @id @default(cuid())
+  noteId    String
+  note      Note    @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  // 1-indexed sequence within the note — used to render "Note title · chunk 3" citations.
+  ordinal   Int
+  heading   String  // nearest preceding heading (e.g. "## Architecture")
+  content   String  // chunk text (markdown)
+  tokens    String  // JSON-stringified token array (used by BM25)
+  embedding String  // JSON-stringified Float32Array (used by vector search)
+  createdAt DateTime @default(now())
+
+  @@index([noteId])
+}
+
+model ChatSession {
+  id        String   @id @default(cuid())
+  title     String   // first 60 chars of the first user message
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  messages ChatMessage[]
+}
+
+model ChatMessage {
+  id        String   @id @default(cuid())
+  sessionId String
+  session   ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  role      String   // "user" | "assistant" | "system"
+  content   String   // raw text of the message (assistant message may contain [^chunkId] citation markers)
+  citations String?  // JSON array of { chunkId, noteId, noteTitle, ordinal, heading, preview }
+  createdAt DateTime @default(now())
+
+  @@index([sessionId])
+}

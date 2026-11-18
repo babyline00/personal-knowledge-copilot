@@ -1,0 +1,789 @@
+     1→'use client'
+     2→
+     3→import * as React from 'react'
+     4→import { useToast } from '@/hooks/use-toast'
+     5→import { Button } from '@/components/ui/button'
+     6→import { Card } from '@/components/ui/card'
+     7→import { Input } from '@/components/ui/input'
+     8→import { Textarea } from '@/components/ui/textarea'
+     9→import { Badge } from '@/components/ui/badge'
+    10→import { ScrollArea } from '@/components/ui/scroll-area'
+    11→import { Separator } from '@/components/ui/separator'
+    12→import { Skeleton } from '@/components/ui/skeleton'
+    13→import {
+    14→  Video as VideoIcon,
+    15→  Trash2,
+    16→  Send,
+    17→  Loader2,
+    18→  BookOpen,
+    19→  Filter,
+    20→  X,
+    21→  CornerDownLeft,
+    22→  MessageSquare,
+    23→  ExternalLink,
+    24→  Play,
+    25→  Clock,
+    26→  ChevronRight,
+    27→  Github,
+    28→  Youtube,
+    29→} from 'lucide-react'
+    30→import { formatTimestamp } from '@/lib/timestamp-format'
+    31→import { buildEmbedUrl } from '@/lib/url-parser'
+    32→
+    33→// ---------- types ----------
+    34→interface Video {
+    35→  id: string
+    36→  youtubeId: string
+    37→  title: string
+    38→  channel: string | null
+    39→  durationSec: number | null
+    40→  thumbnailUrl: string | null
+    41→  importedAt: string
+    42→  _count: { chunks: number; chapters: number }
+    43→}
+    44→interface Citation {
+    45→  chunkId: string
+    46→  videoId: string
+    47→  videoTitle: string
+    48→  startSec: number
+    49→  endSec: number
+    50→  preview: string
+    51→}
+    52→interface ChatMessage {
+    53→  id: string
+    54→  role: 'user' | 'assistant'
+    55→  content: string
+    56→  citations: Citation[]
+    57→  pending?: boolean
+    58→}
+    59→interface Chapter {
+    60→  id: string
+    61→  ordinal: number
+    62→  title: string
+    63→  startSec: number
+    64→  endSec: number
+    65→}
+    66→
+    67→// ---------- helpers ----------
+    68→function renderCitationsInline(content: string): React.ReactNode[] {
+    69→  // Replace [^c1] markers with clickable chips linked to the citation block.
+    70→  const parts: React.ReactNode[] = []
+    71→  const re = /\[\^(c\d+)\]/g
+    72→  let last = 0
+    73→  let m: RegExpExecArray | null
+    74→  while ((m = re.exec(content)) !== null) {
+    75→    if (m.index > last) {
+    76→      parts.push(<React.Fragment key={`t-${last}`}>{content.slice(last, m.index)}</React.Fragment>)
+    77→    }
+    78→    const id = m[1]
+    79→    parts.push(
+    80→      <a
+    81→        key={`c-${m.index}`}
+    82→        href={`#cite-${id}`}
+    83→        className="text-primary text-xs align-super mx-0.5 px-1 rounded bg-primary/10 hover:bg-primary/20 no-underline"
+    84→      >
+    85→        [{id}]
+    86→      </a>,
+    87→    )
+    88→    last = m.index + m[0].length
+    89→  }
+    90→  if (last < content.length) {
+    91→    parts.push(<React.Fragment key={`t-${last}`}>{content.slice(last)}</React.Fragment>)
+    92→  }
+    93→  return parts
+    94→}
+    95→
+    96→function fmtDate(s: string): string {
+    97→  const d = new Date(s)
+    98→  return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+    99→}
+   100→
+   101→function fmtDuration(sec: number | null): string {
+   102→  if (!sec || sec <= 0) return ''
+   103→  return formatTimestamp(sec)
+   104→}
+   105→
+   106→// ---------- main ----------
+   107→export default function Home() {
+   108→  const { toast } = useToast()
+   109→  const [videos, setVideos] = React.useState<Video[]>([])
+   110→  const [loadingVideos, setLoadingVideos] = React.useState(true)
+   111→  const [stats, setStats] = React.useState<{ videos: number; chunks: number; chapters: number }>({ videos: 0, chunks: 0, chapters: 0 })
+   112→  const [filterVideoIds, setFilterVideoIds] = React.useState<Set<string>>(new Set())
+   113→  const [filterOpen, setFilterOpen] = React.useState(false)
+   114→
+   115→  const [urlInput, setUrlInput] = React.useState('')
+   116→  const [importing, setImporting] = React.useState(false)
+   117→
+   118→  const [messages, setMessages] = React.useState<ChatMessage[]>([])
+   119→  const [input, setInput] = React.useState('')
+   120→  const [streaming, setStreaming] = React.useState(false)
+   121→  const [sessionId, setSessionId] = React.useState<string | null>(null)
+   122→
+   123→  // Active video state — the right-column player.
+   124→  const [activeVideo, setActiveVideo] = React.useState<{ id: string; youtubeId: string; title: string; startSec?: number } | null>(null)
+   125→  const [chapters, setChapters] = React.useState<Chapter[]>([])
+   126→  const [chaptersLoading, setChaptersLoading] = React.useState(false)
+   127→
+   128→  const playerRef = React.useRef<HTMLIFrameElement>(null)
+   129→  const messagesEndRef = React.useRef<HTMLDivElement>(null)
+   130→  const inputRef = React.useRef<HTMLTextAreaElement>(null)
+   131→
+   132→  // ---------- data loaders ----------
+   133→  const refreshVideos = React.useCallback(async () => {
+   134→    setLoadingVideos(true)
+   135→    try {
+   136→      const res = await fetch('/api/videos', { cache: 'no-store' })
+   137→      const json = await res.json()
+   138→      setVideos(json.videos ?? [])
+   139→      const sres = await fetch('/api/stats', { cache: 'no-store' })
+   140→      setStats(await sres.json())
+   141→    } catch (e) {
+   142→      toast({ title: 'Failed to load videos', description: (e as Error).message, variant: 'destructive' })
+   143→    } finally {
+   144→      setLoadingVideos(false)
+   145→    }
+   146→  }, [toast])
+   147→
+   148→  React.useEffect(() => {
+   149→    refreshVideos()
+   150→  }, [refreshVideos])
+   151→
+   152→  // Auto-scroll chat to bottom when messages change.
+   153→  React.useEffect(() => {
+   154→    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
+   155→  }, [messages])
+   156→
+   157→  // Load chapters for the active video (right-column sidebar).
+   158→  React.useEffect(() => {
+   159→    if (!activeVideo?.id) {
+   160→      setChapters([])
+   161→      return
+   162→    }
+   163→    let cancelled = false
+   164→    setChaptersLoading(true)
+   165→    fetch(`/api/videos/${activeVideo.id}`, { cache: 'no-store' })
+   166→      .then((r) => r.json())
+   167→      .then((j) => {
+   168→        if (!cancelled) setChapters(j.video?.chapters ?? [])
+   169→      })
+   170→      .catch(() => {
+   171→        if (!cancelled) setChapters([])
+   172→      })
+   173→      .finally(() => {
+   174→        if (!cancelled) setChaptersLoading(false)
+   175→      })
+   176→    return () => {
+   177→      cancelled = true
+   178→    }
+   179→  }, [activeVideo?.id])
+   180→
+   181→  // ---------- import ----------
+   182→  async function importVideo() {
+   183→    const url = urlInput.trim()
+   184→    if (!url) {
+   185→      toast({ title: 'Paste a YouTube URL first', variant: 'destructive' })
+   186→      return
+   187→    }
+   188→    setImporting(true)
+   189→    try {
+   190→      const res = await fetch('/api/videos/import', {
+   191→        method: 'POST',
+   192→        headers: { 'Content-Type': 'application/json' },
+   193→        body: JSON.stringify({ url }),
+   194→      })
+   195→      const json = await res.json()
+   196→      if (!res.ok) {
+   197→        throw new Error(json.error || `HTTP ${res.status}`)
+   198→      }
+   199→      toast({
+   200→        title: `Imported "${json.title}"`,
+   201→        description: `Indexed ${json.chunks} chunks across ${json.chapters} chapter${json.chapters === 1 ? '' : 's'}.`,
+   202→      })
+   203→      setUrlInput('')
+   204→      await refreshVideos()
+   205→    } catch (e) {
+   206→      toast({ title: 'Import failed', description: (e as Error).message, variant: 'destructive' })
+   207→    } finally {
+   208→      setImporting(false)
+   209→    }
+   210→  }
+   211→
+   212→  async function deleteVideo(id: string, title: string) {
+   213→    if (!confirm(`Delete "${title}"? Its chunks and chapters will be unindexed.`)) return
+   214→    try {
+   215→      const res = await fetch(`/api/videos/${id}`, { method: 'DELETE' })
+   216→      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+   217→      toast({ title: 'Video removed' })
+   218→      setFilterVideoIds((prev) => {
+   219→        const n = new Set(prev)
+   220→        n.delete(id)
+   221→        return n
+   222→      })
+   223→      if (activeVideo?.id === id) setActiveVideo(null)
+   224→      await refreshVideos()
+   225→    } catch (e) {
+   226→      toast({ title: 'Delete failed', description: (e as Error).message, variant: 'destructive' })
+   227→    }
+   228→  }
+   229→
+   230→  // ---------- chat ----------
+   231→  async function sendMessage() {
+   232→    const text = input.trim()
+   233→    if (!text || streaming) return
+   234→    setInput('')
+   235→    const userMsg: ChatMessage = { id: `u-${Date.now()}`, role: 'user', content: text, citations: [] }
+   236→    const pendingMsg: ChatMessage = { id: `a-${Date.now()}`, role: 'assistant', content: '', citations: [], pending: true }
+   237→    setMessages((m) => [...m, userMsg, pendingMsg])
+   238→    setStreaming(true)
+   239→
+   240→    try {
+   241→      const res = await fetch('/api/chat', {
+   242→        method: 'POST',
+   243→        headers: { 'Content-Type': 'application/json' },
+   244→        body: JSON.stringify({
+   245→          message: text,
+   246→          sessionId: sessionId,
+   247→          filterVideoIds: filterVideoIds.size ? Array.from(filterVideoIds) : undefined,
+   248→        }),
+   249→      })
+   250→      if (!res.ok || !res.body) {
+   251→        const errText = await res.text().catch(() => 'request failed')
+   252→        throw new Error(errText)
+   253→      }
+   254→      const sid = res.headers.get('X-Session-Id')
+   255→      if (sid) setSessionId(sid)
+   256→
+   257→      const reader = res.body.getReader()
+   258→      const decoder = new TextDecoder()
+   259→      let buffer = ''
+   260→      let assistantText = ''
+   261→      let footerParsed: { sessionId?: string; citations: Citation[]; activeVideoId?: string | null; activeStartSec?: number | null } | null = null
+   262→
+   263→      while (true) {
+   264→        const { done, value } = await reader.read()
+   265→        if (done) break
+   266→        buffer += decoder.decode(value, { stream: true })
+   267→
+   268→        const sepIdx = buffer.indexOf('\n\n---CITATIONS---\n')
+   269→        let body = buffer
+   270→        if (sepIdx !== -1) {
+   271→          body = buffer.slice(0, sepIdx)
+   272→          const footerRaw = buffer.slice(sepIdx + '\n\n---CITATIONS---\n'.length)
+   273→          try {
+   274→            footerParsed = JSON.parse(footerRaw)
+   275→            if (footerParsed?.sessionId) setSessionId(footerParsed.sessionId)
+   276→          } catch {
+   277→            footerParsed = { citations: [] }
+   278→          }
+   279→        }
+   280→        if (body !== assistantText) {
+   281→          assistantText = body
+   282→          setMessages((m) =>
+   283→            m.map((msg) => (msg.id === pendingMsg.id ? { ...msg, content: assistantText } : msg))
+   284→          )
+   285→        }
+   286→      }
+   287→      setMessages((m) =>
+   288→        m.map((msg) =>
+   289→          msg.id === pendingMsg.id
+   290→            ? {
+   291→                ...msg,
+   292→                pending: false,
+   293→                content: assistantText,
+   294→                citations: footerParsed?.citations ?? [],
+   295→              }
+   296→            : msg
+   297→        )
+   298→      )
+   299→
+   300→      // Auto-focus the player on the FIRST cited video so the user can
+   301→      // immediately see where the answer came from.
+   302→      if (footerParsed?.activeVideoId) {
+   303→        const vid = videos.find((v) => v.id === footerParsed.activeVideoId) ?? null
+   304→        const firstCit = footerParsed.citations[0]
+   305→        const youtubeId = vid?.youtubeId ?? firstCit?.videoId ?? null
+   306→        if (youtubeId) {
+   307→          // If the active video is the same as the cited video, just seek; else swap.
+   308→          if (activeVideo?.id !== footerParsed.activeVideoId) {
+   309→            setActiveVideo({
+   310→              id: footerParsed.activeVideoId,
+   311→              youtubeId,
+   312→              title: vid?.title ?? firstCit?.videoTitle ?? 'YouTube video',
+   313→              startSec: footerParsed.activeStartSec ?? undefined,
+   314→            })
+   315→          } else if (typeof footerParsed.activeStartSec === 'number') {
+   316→            seekPlayer(footerParsed.activeStartSec)
+   317→          }
+   318→        }
+   319→      }
+   320→    } catch (e) {
+   321→      setMessages((m) =>
+   322→        m.map((msg) =>
+   323→          msg.id === pendingMsg.id
+   324→            ? { ...msg, pending: false, content: `⚠️ ${(e as Error).message}` }
+   325→            : msg
+   326→        )
+   327→      )
+   328→      toast({ title: 'Chat error', description: (e as Error).message, variant: 'destructive' })
+   329→    } finally {
+   330→      setStreaming(false)
+   331→    }
+   332→  }
+   333→
+   334→  function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+   335→    if (e.key === 'Enter' && !e.shiftKey) {
+   336→      e.preventDefault()
+   337→      sendMessage()
+   338→    }
+   339→  }
+   340→
+   341→  // ---------- player seek ----------
+   342→  // The right-column iframe uses the YouTube IFrame Player API. We postMessage
+   343→  // the `seekTo` command to it. (The `enablejsapi=1` URL param activates the
+   344→  // postMessage API.)
+   345→  function seekPlayer(seconds: number) {
+   346→    const iframe = playerRef.current
+   347→    if (!iframe) return
+   348→    const sec = Math.max(0, Math.floor(seconds))
+   349→    // YouTube IFrame API: {"event":"command","func":"seekTo","args":["<sec>", true]}
+   350→    iframe.contentWindow?.postMessage(
+   351→      JSON.stringify({ event: 'command', func: 'seekTo', args: [String(sec), true] }),
+   352→      '*',
+   353→    )
+   354→    iframe.contentWindow?.postMessage(
+   355→      JSON.stringify({ event: 'command', func: 'playVideo', args: [] }),
+   356→      '*',
+   357→    )
+   358→  }
+   359→
+   360→  function onCitationClick(c: Citation) {
+   361→    // If the cited video isn't currently active, swap the iframe to it (the
+   362→    // startSec will be applied via the `start` URL param on first render).
+   363→    // Otherwise just seek the existing player.
+   364→    if (activeVideo?.id === c.videoId) {
+   365→      seekPlayer(c.startSec)
+   366→    } else {
+   367→      const vid = videos.find((v) => v.id === c.videoId)
+   368→      setActiveVideo({
+   369→        id: c.videoId,
+   370→        youtubeId: vid?.youtubeId ?? '',
+   371→        title: vid?.title ?? c.videoTitle,
+   372→        startSec: c.startSec,
+   373→      })
+   374→    }
+   375→  }
+   376→
+   377→  function onChapterClick(c: Chapter) {
+   378→    if (!activeVideo) return
+   379→    seekPlayer(c.startSec)
+   380→  }
+   381→
+   382→  const activeFilterCount = filterVideoIds.size
+   383→
+   384→  return (
+   385→    <div className="min-h-screen flex flex-col bg-background text-foreground">
+   386→      {/* Header */}
+   387→      <header className="border-b bg-background/80 backdrop-blur sticky top-0 z-10">
+   388→        <div className="flex items-center justify-between px-4 sm:px-6 py-3 gap-3">
+   389→          <div className="flex items-center gap-3">
+   390→            <div className="size-9 rounded-lg bg-primary/10 grid place-items-center">
+   391→              <Youtube className="size-5 text-primary" />
+   392→            </div>
+   393→            <div>
+   394→              <h1 className="text-base font-semibold leading-tight">YouTube Transcript RAG</h1>
+   395→              <p className="text-xs text-muted-foreground">
+   396→                {stats.videos} videos · {stats.chunks} chunks · {stats.chapters} chapters
+   397→              </p>
+   398→            </div>
+   399→          </div>
+   400→          <div className="flex items-center gap-2">
+   401→            <a
+   402→              href="https://github.com"
+   403→              target="_blank"
+   404→              rel="noopener noreferrer"
+   405→              className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+   406→            >
+   407→              <Github className="size-3.5" />
+   408→              <span className="hidden sm:inline">Source</span>
+   409→            </a>
+   410→          </div>
+   411→        </div>
+   412→      </header>
+   413→
+   414→      {/* Main 3-column grid */}
+   415→      <main className="flex-1 grid grid-cols-1 lg:grid-cols-[280px_minmax(0,1fr)_minmax(0,360px)] xl:grid-cols-[300px_minmax(0,1fr)_400px]">
+   416→        {/* Left column: videos sidebar */}
+   417→        <aside className="border-r bg-muted/30 lg:sticky lg:top-[57px] lg:h-[calc(100vh-57px)] lg:overflow-hidden flex flex-col">
+   418→          <div className="p-4 space-y-2 border-b">
+   419→            <h2 className="text-sm font-semibold flex items-center gap-1.5">
+   420→              <VideoIcon className="size-4" />
+   421→              Add a video
+   422→            </h2>
+   423→            <div className="flex gap-1.5">
+   424→              <Input
+   425→                value={urlInput}
+   426→                onChange={(e) => setUrlInput(e.target.value)}
+   427→                onKeyDown={(e) => {
+   428→                  if (e.key === 'Enter' && !e.shiftKey) {
+   429→                    e.preventDefault()
+   430→                    importVideo()
+   431→                  }
+   432→                }}
+   433→                placeholder="Paste https://youtube.com/watch?v=…"
+   434→                className="text-xs"
+   435→                disabled={importing}
+   436→              />
+   437→              <Button size="sm" onClick={importVideo} disabled={importing} aria-label="Import video">
+   438→                {importing ? <Loader2 className="size-4 animate-spin" /> : <ChevronRight className="size-4" />}
+   439→              </Button>
+   440→            </div>
+   441→            <p className="text-[10px] text-muted-foreground leading-tight">
+   442→              Single-video imports. Channel ingestion is a stretch goal.
+   443→            </p>
+   444→          </div>
+   445→
+   446→          <div className="p-4 flex items-center justify-between gap-2">
+   447→            <h2 className="text-sm font-semibold">Videos</h2>
+   448→            <Button
+   449→              variant={filterOpen ? 'secondary' : 'ghost'}
+   450→              size="sm"
+   451→              className="h-7 text-xs"
+   452→              onClick={() => setFilterOpen((v) => !v)}
+   453→              disabled={!videos.length}
+   454→            >
+   455→              <Filter className="size-3.5 mr-1" />
+   456→              Filter
+   457→              {activeFilterCount > 0 && (
+   458→                <Badge variant="secondary" className="ml-1 h-4 px-1 text-[10px]">{activeFilterCount}</Badge>
+   459→              )}
+   460→            </Button>
+   461→          </div>
+   462→          <Separator />
+   463→          {filterOpen && videos.length > 0 && (
+   464→            <div className="p-3 border-b bg-background">
+   465→              <div className="flex items-center justify-between mb-2">
+   466→                <span className="text-xs text-muted-foreground">Limit search to:</span>
+   467→                {activeFilterCount > 0 && (
+   468→                  <button
+   469→                    className="text-xs text-primary hover:underline"
+   470→                    onClick={() => setFilterVideoIds(new Set())}
+   471→                  >
+   472→                    Clear ({activeFilterCount})
+   473→                  </button>
+   474→                )}
+   475→              </div>
+   476→              <div className="max-h-40 overflow-y-auto space-y-1.5 pr-1">
+   477→                {videos.map((v) => (
+   478→                  <label key={v.id} className="flex items-start gap-2 text-xs cursor-pointer hover:bg-muted/40 rounded p-1">
+   479→                    <input
+   480→                      type="checkbox"
+   481→                      checked={filterVideoIds.has(v.id)}
+   482→                      onChange={(e) => {
+   483→                        setFilterVideoIds((prev) => {
+   484→                          const next = new Set(prev)
+   485→                          if (e.target.checked) next.add(v.id)
+   486→                          else next.delete(v.id)
+   487→                          return next
+   488→                        })
+   489→                      }}
+   490→                      className="mt-0.5 size-3.5"
+   491→                    />
+   492→                    <span className="line-clamp-2">{v.title}</span>
+   493→                  </label>
+   494→                ))}
+   495→              </div>
+   496→            </div>
+   497→          )}
+   498→          <ScrollArea className="flex-1">
+   499→            <div className="p-2 space-y-1">
+   500→              {loadingVideos ? (
+   501→                <>
+   502→                  <Skeleton className="h-20 w-full" />
+   503→                  <Skeleton className="h-20 w-full" />
+   504→                  <Skeleton className="h-20 w-full" />
+   505→                </>
+   506→              ) : videos.length === 0 ? (
+   507→                <div className="p-4 text-center text-xs text-muted-foreground">
+   508→                  No videos yet. Paste a YouTube URL above to import its transcript.
+   509→                </div>
+   510→              ) : (
+   511→                videos.map((v) => (
+   512→                  <Card
+   513→                    key={v.id}
+   514→                    className={`p-2 hover:bg-muted/40 transition-colors cursor-pointer ${
+   515→                      activeVideo?.id === v.id ? 'ring-1 ring-primary' : ''
+   516→                    }`}
+   517→                    onClick={() => setActiveVideo({ id: v.id, youtubeId: v.youtubeId, title: v.title, startSec: 0 })}
+   518→                  >
+   519→                    <div className="flex gap-2">
+   520→                      <div className="relative w-20 h-12 rounded overflow-hidden bg-muted flex-shrink-0">
+   521→                        {v.thumbnailUrl ? (
+   522→                          <img
+   523→                            src={v.thumbnailUrl}
+   524→                            alt=""
+   525→                            className="w-full h-full object-cover"
+   526→                            loading="lazy"
+   527→                          />
+   528→                        ) : (
+   529→                          <div className="w-full h-full grid place-items-center">
+   530→                            <Play className="size-4 text-muted-foreground" />
+   531→                          </div>
+   532→                        )}
+   533→                        {v.durationSec ? (
+   534→                          <span className="absolute bottom-0 right-0 bg-black/70 text-white text-[9px] px-1 rounded-sm">
+   535→                            {fmtDuration(v.durationSec)}
+   536→                          </span>
+   537→                        ) : null}
+   538→                      </div>
+   539→                      <div className="min-w-0 flex-1">
+   540→                        <p className="text-xs font-medium line-clamp-2 leading-snug">{v.title}</p>
+   541→                        <p className="text-[10px] text-muted-foreground mt-0.5">
+   542→                          {v._count.chunks} chunks · {v._count.chapters} ch
+   543→                          {v.channel ? ` · ${v.channel}` : ''}
+   544→                        </p>
+   545→                        <p className="text-[10px] text-muted-foreground/70 mt-0.5 flex items-center gap-1">
+   546→                          <Clock className="size-2.5" />
+   547→                          <span>{fmtDate(v.importedAt)}</span>
+   548→                        </p>
+   549→                      </div>
+   550→                      <Button
+   551→                        variant="ghost"
+   552→                        size="icon"
+   553→                        className="size-6 text-muted-foreground hover:text-destructive flex-shrink-0"
+   554→                        onClick={(e) => {
+   555→                          e.stopPropagation()
+   556→                          deleteVideo(v.id, v.title)
+   557→                        }}
+   558→                        aria-label={`Delete ${v.title}`}
+   559→                      >
+   560→                        <Trash2 className="size-3.5" />
+   561→                      </Button>
+   562→                    </div>
+   563→                  </Card>
+   564→                ))
+   565→              )}
+   566→            </div>
+   567→          </ScrollArea>
+   568→        </aside>
+   569→
+   570→        {/* Center column: chat */}
+   571→        <section className="flex flex-col min-h-[60vh] lg:h-[calc(100vh-57px)] border-r">
+   572→          {/* Chat header */}
+   573→          <div className="px-4 py-3 border-b flex items-center gap-2">
+   574→            <MessageSquare className="size-4 text-muted-foreground" />
+   575→            <h2 className="text-sm font-semibold">Ask across transcripts</h2>
+   576→            {activeFilterCount > 0 && (
+   577→              <Badge variant="secondary" className="text-[10px]">
+   578→                {activeFilterCount} video{activeFilterCount === 1 ? '' : 's'} filtered
+   579→              </Badge>
+   580→            )}
+   581→            <div className="ml-auto">
+   582→              <Button
+   583→                variant="ghost"
+   584→                size="sm"
+   585→                className="h-7 text-xs"
+   586→                onClick={() => {
+   587→                  setMessages([])
+   588→                  setSessionId(null)
+   589→                }}
+   590→                disabled={!messages.length || streaming}
+   591→              >
+   592→                <X className="size-3.5 mr-1" />
+   593→                Clear
+   594→              </Button>
+   595→            </div>
+   596→          </div>
+   597→
+   598→          {/* Messages */}
+   599→          <ScrollArea className="flex-1">
+   600→            <div className="p-4 space-y-4 max-w-3xl mx-auto">
+   601→              {messages.length === 0 ? (
+   602→                <div className="text-center text-sm text-muted-foreground py-16">
+   603→                  <BookOpen className="size-8 mx-auto mb-3 text-muted-foreground/60" />
+   604→                  <p className="font-medium">Ask a question about your imported videos.</p>
+   605→                  <p className="text-xs mt-1 max-w-md mx-auto">
+   606→                    Try &quot;what does the speaker say about X?&quot; — every claim comes with a timestamped
+   607→                    citation you can click to jump to the moment in the player on the right.
+   608→                  </p>
+   609→                </div>
+   610→              ) : (
+   611→                messages.map((m) => (
+   612→                  <div key={m.id} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+   613→                    <div
+   614→                      className={`rounded-lg px-4 py-3 max-w-[85%] ${
+   615→                        m.role === 'user'
+   616→                          ? 'bg-primary text-primary-foreground'
+   617→                          : 'bg-muted/60 border'
+   618→                      }`}
+   619→                    >
+   620→                      <div className="text-sm whitespace-pre-wrap break-words leading-relaxed">
+   621→                        {m.pending && !m.content ? (
+   622→                          <Loader2 className="size-4 animate-spin" />
+   623→                        ) : (
+   624→                          m.role === 'assistant'
+   625→                            ? renderCitationsInline(m.content)
+   626→                            : m.content
+   627→                        )}
+   628→                      </div>
+   629→                      {m.citations.length > 0 && (
+   630→                        <div className="mt-3 pt-3 border-t border-border/40 space-y-2">
+   631→                          <p className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold">
+   632→                            Sources — click to jump
+   633→                          </p>
+   634→                          {m.citations.map((c, i) => (
+   635→                            <div
+   636→                              id={`cite-c${i + 1}`}
+   637→                              key={c.chunkId}
+   638→                              className="rounded-md bg-background border p-2 text-xs flex gap-2"
+   639→                            >
+   640→                              <div className="min-w-0 flex-1">
+   641→                                <p className="font-medium line-clamp-1">
+   642→                                  {c.videoTitle} · {formatTimestamp(c.startSec)}
+   643→                                </p>
+   644→                                <p className="text-muted-foreground line-clamp-2 mt-0.5">{c.preview}</p>
+   645→                              </div>
+   646→                              <Button
+   647→                                variant="secondary"
+   648→                                size="sm"
+   649→                                className="h-7 text-[11px] flex-shrink-0"
+   650→                                onClick={() => onCitationClick(c)}
+   651→                                aria-label={`Jump to ${formatTimestamp(c.startSec)} in ${c.videoTitle}`}
+   652→                              >
+   653→                                <Play className="size-3 mr-1" />
+   654→                                Jump to {formatTimestamp(c.startSec)}
+   655→                              </Button>
+   656→                            </div>
+   657→                          ))}
+   658→                        </div>
+   659→                      )}
+   660→                    </div>
+   661→                  </div>
+   662→                ))
+   663→              )}
+   664→              <div ref={messagesEndRef} />
+   665→            </div>
+   666→          </ScrollArea>
+   667→
+   668→          {/* Input */}
+   669→          <div className="border-t p-3 bg-background">
+   670→            <div className="max-w-3xl mx-auto">
+   671→              <div className="relative">
+   672→                <Textarea
+   673→                  ref={inputRef}
+   674→                  value={input}
+   675→                  onChange={(e) => setInput(e.target.value)}
+   676→                  onKeyDown={onKeyDown}
+   677→                  placeholder={videos.length ? 'Ask a question about the transcripts…' : 'Import a video first, then ask…'}
+   678→                  disabled={streaming || !videos.length}
+   679→                  className="min-h-[48px] max-h-[160px] resize-none pr-12 text-sm"
+   680→                  rows={2}
+   681→                />
+   682→                <Button
+   683→                  size="icon"
+   684→                  className="absolute right-2 bottom-2 size-8"
+   685→                  onClick={sendMessage}
+   686→                  disabled={!input.trim() || streaming || !videos.length}
+   687→                  aria-label="Send"
+   688→                >
+   689→                  {streaming ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
+   690→                </Button>
+   691→              </div>
+   692→              <p className="text-[10px] text-muted-foreground mt-1.5 flex items-center gap-1">
+   693→                <CornerDownLeft className="size-2.5" />
+   694→                Enter to send · Shift+Enter for newline
+   695→              </p>
+   696→            </div>
+   697→          </div>
+   698→        </section>
+   699→
+   700→        {/* Right column: video player + chapters */}
+   701→        <aside className="flex flex-col min-h-[40vh] lg:h-[calc(100vh-57px)] bg-muted/20">
+   702→          {!activeVideo ? (
+   703→            <div className="flex-1 grid place-items-center p-6 text-center">
+   704→              <div>
+   705→                <div className="size-12 mx-auto rounded-lg bg-muted grid place-items-center mb-3">
+   706→                  <Play className="size-6 text-muted-foreground" />
+   707→                </div>
+   708→                <p className="text-sm font-medium">No video selected</p>
+   709→                <p className="text-xs text-muted-foreground mt-1 max-w-[240px]">
+   710→                  Click a video in the sidebar, or ask a question — citations will auto-focus the
+   711→                  referenced video here.
+   712→                </p>
+   713→              </div>
+   714→            </div>
+   715→          ) : (
+   716→            <>
+   717→              <div className="aspect-video w-full bg-black">
+   718→                <iframe
+   719→                  ref={playerRef}
+   720→                  key={`${activeVideo.youtubeId}-${activeVideo.startSec ?? 0}`}
+   721→                  src={buildEmbedUrl(activeVideo.youtubeId, { startSec: activeVideo.startSec ?? 0, autoplay: false })}
+   722→                  title={activeVideo.title}
+   723→                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+   724→                  allowFullScreen
+   725→                  className="w-full h-full"
+   726→                />
+   727→              </div>
+   728→              <div className="p-3 border-b">
+   729→                <p className="text-xs font-medium line-clamp-2 leading-snug">{activeVideo.title}</p>
+   730→                <a
+   731→                  href={`https://www.youtube.com/watch?v=${activeVideo.youtubeId}`}
+   732→                  target="_blank"
+   733→                  rel="noopener noreferrer"
+   734→                  className="text-[10px] text-muted-foreground hover:text-foreground inline-flex items-center gap-1 mt-1"
+   735→                >
+   736→                  <ExternalLink className="size-2.5" />
+   737→                  Open on YouTube
+   738→                </a>
+   739→              </div>
+   740→              <div className="p-3 border-b">
+   741→                <h3 className="text-xs font-semibold flex items-center gap-1.5 mb-2">
+   742→                  <BookOpen className="size-3.5" />
+   743→                  Chapters
+   744→                </h3>
+   745→              </div>
+   746→              <ScrollArea className="flex-1">
+   747→                <div className="p-2 space-y-0.5">
+   748→                  {chaptersLoading ? (
+   749→                    <>
+   750→                      <Skeleton className="h-8 w-full" />
+   751→                      <Skeleton className="h-8 w-full" />
+   752→                      <Skeleton className="h-8 w-full" />
+   753→                    </>
+   754→                  ) : chapters.length === 0 ? (
+   755→                    <p className="p-3 text-[11px] text-muted-foreground text-center">
+   756→                      No chapters detected (video may be too short for gap-based chaptering).
+   757→                    </p>
+   758→                  ) : (
+   759→                    chapters.map((c) => (
+   760→                      <button
+   761→                        key={c.id}
+   762→                        onClick={() => onChapterClick(c)}
+   763→                        className="w-full text-left p-2 rounded hover:bg-muted/60 transition-colors flex gap-2 group"
+   764→                      >
+   765→                        <span className="text-[10px] text-muted-foreground font-mono tabular-nums flex-shrink-0 mt-0.5">
+   766→                          {formatTimestamp(c.startSec)}
+   767→                        </span>
+   768→                        <span className="text-xs line-clamp-2 group-hover:text-foreground">
+   769→                          {c.title}
+   770→                        </span>
+   771→                      </button>
+   772→                    ))
+   773→                  )}
+   774→                </div>
+   775→              </ScrollArea>
+   776→            </>
+   777→          )}
+   778→        </aside>
+   779→      </main>
+   780→
+   781→      {/* Footer */}
+   782→      <footer className="border-t bg-background px-4 py-2 text-[11px] text-muted-foreground text-center mt-auto">
+   783→        YouTube Transcript RAG — local-first hybrid retrieval + streaming chat. Built with Next.js 16,
+   784→        Prisma + SQLite, and the z-ai-web-dev-sdk.
+   785→      </footer>
+   786→    </div>
+   787→  )
+   788→}
+   789→

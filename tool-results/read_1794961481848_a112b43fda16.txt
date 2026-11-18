@@ -1,0 +1,1208 @@
+     1→"use client";
+     2→
+     3→/**
+     4→ * AI-Powered Coding Interview Prep — single-page dashboard.
+     5→ *
+     6→ * 3-column layout (responsive — stacks on mobile):
+     7→ *   - LEFT:    problem list (filter by difficulty + category),
+     8→ *             "Start technical" + "Start behavioral" buttons,
+     9→ *             "Recommended next" card.
+    10→ *   - CENTER:  chat panel (AI interviewer + user input + hint button +
+    11→ *             submit button), code editor (plain <textarea>), "Run tests"
+    12→ *             button + per-test results panel.
+    13→ *   - RIGHT:   per-session score card + breakdown + "Recommended next" link
+    14→ *             + aggregate stats (sessions completed, avg score, weak spots).
+    15→ *
+    16→ * State is held in this single client component — no global store. The API
+    17→ * routes (see src/app/api) handle all persistence + LLM calls.
+    18→ */
+    19→
+    20→import * as React from "react";
+    21→import { toast } from "sonner";
+    22→import {
+    23→  Code2,
+    24→  MessageSquare,
+    25→  Play,
+    26→  Send,
+    27→  Sparkles,
+    28→  Lightbulb,
+    29→  Trophy,
+    30→  TrendingDown,
+    31→  BarChart3,
+    32→  ListChecks,
+    33→  ChevronRight,
+    34→  RefreshCw,
+    35→  Brain,
+    36→  CheckCircle2,
+    37→  XCircle,
+    38→  Clock,
+    39→  Hash,
+    40→  type LucideIcon,
+    41→} from "lucide-react";
+    42→
+    43→import { Button } from "@/components/ui/button";
+    44→import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardFooter } from "@/components/ui/card";
+    45→import { Badge } from "@/components/ui/badge";
+    46→import { Input } from "@/components/ui/input";
+    47→import { Textarea } from "@/components/ui/textarea";
+    48→import { Label } from "@/components/ui/label";
+    49→import {
+    50→  Select,
+    51→  SelectContent,
+    52→  SelectItem,
+    53→  SelectTrigger,
+    54→  SelectValue,
+    55→} from "@/components/ui/select";
+    56→import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+    57→import { ScrollArea } from "@/components/ui/scroll-area";
+    58→import { Separator } from "@/components/ui/separator";
+    59→import { Progress } from "@/components/ui/progress";
+    60→import { Skeleton } from "@/components/ui/skeleton";
+    61→import { cn } from "@/lib/utils";
+    62→
+    63→// --- types ------------------------------------------------------------------
+    64→
+    65→type Difficulty = "easy" | "medium" | "hard";
+    66→type Category =
+    67→  | "arrays"
+    68→  | "strings"
+    69→  | "dp"
+    70→  | "graph"
+    71→  | "tree"
+    72→  | "two-pointers"
+    73→  | "binary-search";
+    74→
+    75→interface Problem {
+    76→  id: string;
+    77→  title: string;
+    78→  slug: string;
+    79→  difficulty: Difficulty;
+    80→  category: Category;
+    81→  statement: string;
+    82→  signature: string;
+    83→  hints: string[];
+    84→}
+    85→
+    86→interface Message {
+    87→  id?: string;
+    88→  role: "user" | "assistant" | "system";
+    89→  content: string;
+    90→  createdAt?: string;
+    91→}
+    92→
+    93→interface TestResult {
+    94→  name: string;
+    95→  passed: boolean;
+    96→  expected: string;
+    97→  actual: string;
+    98→  error?: string;
+    99→}
+   100→
+   101→interface TestRunResponse {
+   102→  testRunId: string;
+   103→  passedCount: number;
+   104→  totalCount: number;
+   105→  results: TestResult[];
+   106→  compileError?: string;
+   107→  timedOut?: boolean;
+   108→}
+   109→
+   110→interface Session {
+   111→  id: string;
+   112→  type: "technical" | "behavioral";
+   113→  status: "active" | "completed";
+   114→  score?: number | null;
+   115→  scoreBreakdown?: any;
+   116→  feedback?: string | null;
+   117→  complexityReported?: string | null;
+   118→  hintsUsedCount: number;
+   119→  behavioralQuestion?: string | null;
+   120→  problem?: Problem | null;
+   121→  messages: Message[];
+   122→  testRuns: any[];
+   123→}
+   124→
+   125→interface Stats {
+   126→  sessionsCompleted: number;
+   127→  avgScore: number;
+   128→  hintsPerSessionAvg: number;
+   129→  totalHintsUsed: number;
+   130→  categoryFailCounts: Record<string, number>;
+   131→  weakness: Array<{ category: string; count: number }>;
+   132→  lastRecommendedSlug: string | null;
+   133→}
+   134→
+   135→// --- constants -------------------------------------------------------------
+   136→
+   137→const DIFFICULTIES: Difficulty[] = ["easy", "medium", "hard"];
+   138→const CATEGORIES: Category[] = [
+   139→  "arrays",
+   140→  "strings",
+   141→  "dp",
+   142→  "graph",
+   143→  "tree",
+   144→  "two-pointers",
+   145→  "binary-search",
+   146→];
+   147→
+   148→const DIFFICULTY_COLOR: Record<Difficulty, string> = {
+   149→  easy: "bg-emerald-100 text-emerald-800 border-emerald-300",
+   150→  medium: "bg-amber-100 text-amber-800 border-amber-300",
+   151→  hard: "bg-rose-100 text-rose-800 border-rose-300",
+   152→};
+   153→
+   154→// --- page ------------------------------------------------------------------
+   155→
+   156→export default function Page() {
+   157→  const [problems, setProblems] = React.useState<Problem[]>([]);
+   158→  const [stats, setStats] = React.useState<Stats | null>(null);
+   159→  const [loadingProblems, setLoadingProblems] = React.useState(true);
+   160→  const [filterDiff, setFilterDiff] = React.useState<Difficulty | "all">("all");
+   161→  const [filterCat, setFilterCat] = React.useState<Category | "all">("all");
+   162→
+   163→  const [activeSession, setActiveSession] = React.useState<Session | null>(null);
+   164→  const [code, setCode] = React.useState<string>("");
+   165→  const [chatInput, setChatInput] = React.useState<string>("");
+   166→  const [sending, setSending] = React.useState(false);
+   167→  const [runningTests, setRunningTests] = React.useState(false);
+   168→  const [submitting, setSubmitting] = React.useState(false);
+   169→  const [testResults, setTestResults] = React.useState<TestRunResponse | null>(null);
+   170→  const [startingSession, setStartingSession] = React.useState(false);
+   171→  const [recommended, setRecommended] = React.useState<any | null>(null);
+   172→
+   173→  const loadProblems = React.useCallback(async () => {
+   174→    setLoadingProblems(true);
+   175→    try {
+   176→      const params = new URLSearchParams();
+   177→      if (filterDiff !== "all") params.set("difficulty", filterDiff);
+   178→      if (filterCat !== "all") params.set("category", filterCat);
+   179→      const res = await fetch(`/api/problems?${params.toString()}`);
+   180→      const json = await res.json();
+   181→      setProblems(json.problems || []);
+   182→    } catch (e) {
+   183→      toast.error("Failed to load problems", { description: (e as Error).message });
+   184→    } finally {
+   185→      setLoadingProblems(false);
+   186→    }
+   187→  }, [filterDiff, filterCat]);
+   188→
+   189→  const loadStats = React.useCallback(async () => {
+   190→    try {
+   191→      const res = await fetch("/api/stats");
+   192→      const json = await res.json();
+   193→      setStats(json.stats || null);
+   194→    } catch {
+   195→      // ignore — stats card just stays empty
+   196→    }
+   197→  }, []);
+   198→
+   199→  React.useEffect(() => {
+   200→    loadProblems();
+   201→    loadStats();
+   202→  }, [loadProblems, loadStats]);
+   203→
+   204→  const startTechnical = async (problem: Problem) => {
+   205→    setStartingSession(true);
+   206→    try {
+   207→      const res = await fetch("/api/interviews", {
+   208→        method: "POST",
+   209→        headers: { "Content-Type": "application/json" },
+   210→        body: JSON.stringify({ type: "technical", problemId: problem.id }),
+   211→      });
+   212→      const json = await res.json();
+   213→      if (!res.ok) throw new Error(json.error || "Failed to start session");
+   214→      setActiveSession({
+   215→        id: json.session.id,
+   216→        type: "technical",
+   217→        status: "active",
+   218→        problem: json.session.problem,
+   219→        hintsUsedCount: 0,
+   220→        messages: [
+   221→          { role: "assistant", content: json.greeting },
+   222→        ],
+   223→        testRuns: [],
+   224→      });
+   225→      setCode(starterCode(json.session.problem));
+   226→      setTestResults(null);
+   227→      setRecommended(null);
+   228→      toast.success(`Started technical interview: ${problem.title}`);
+   229→    } catch (e) {
+   230→      toast.error("Failed to start interview", { description: (e as Error).message });
+   231→    } finally {
+   232→      setStartingSession(false);
+   233→    }
+   234→  };
+   235→
+   236→  const startBehavioral = async () => {
+   237→    setStartingSession(true);
+   238→    try {
+   239→      const res = await fetch("/api/interviews", {
+   240→        method: "POST",
+   241→        headers: { "Content-Type": "application/json" },
+   242→        body: JSON.stringify({ type: "behavioral" }),
+   243→      });
+   244→      const json = await res.json();
+   245→      if (!res.ok) throw new Error(json.error || "Failed to start session");
+   246→      setActiveSession({
+   247→        id: json.session.id,
+   248→        type: "behavioral",
+   249→        status: "active",
+   250→        behavioralQuestion: json.session.behavioralQuestion,
+   251→        hintsUsedCount: 0,
+   252→        messages: [{ role: "assistant", content: json.greeting }],
+   253→        testRuns: [],
+   254→      });
+   255→      setCode("");
+   256→      setTestResults(null);
+   257→      setRecommended(null);
+   258→      toast.success("Started behavioral interview");
+   259→    } catch (e) {
+   260→      toast.error("Failed to start interview", { description: (e as Error).message });
+   261→    } finally {
+   262→      setStartingSession(false);
+   263→    }
+   264→  };
+   265→
+   266→  const sendMessage = async (requestHint = false) => {
+   267→    if (!activeSession) return;
+   268→    const content = requestHint ? "I'm stuck — please give me a hint." : chatInput.trim();
+   269→    if (!content) return;
+   270→    setSending(true);
+   271→    setChatInput("");
+   272→    // Optimistic user message
+   273→    const optimistic: Message = { role: "user", content };
+   274→    setActiveSession((s) =>
+   275→      s ? { ...s, messages: [...s.messages, optimistic] } : s,
+   276→    );
+   277→    try {
+   278→      const res = await fetch(`/api/interviews/${activeSession.id}/messages`, {
+   279→        method: "POST",
+   280→        headers: { "Content-Type": "application/json" },
+   281→        body: JSON.stringify({ content, requestHint }),
+   282→      });
+   283→      const json = await res.json();
+   284→      if (!res.ok) throw new Error(json.error || "Failed to send message");
+   285→      setActiveSession((s) =>
+   286→        s
+   287→          ? {
+   288→              ...s,
+   289→              hintsUsedCount: s.hintsUsedCount + (json.hintServed ? 1 : 0),
+   290→              messages: [...s.messages, { role: "assistant", content: json.reply }],
+   291→            }
+   292→          : s,
+   293→      );
+   294→      if (json.hintServed) {
+   295→        toast.info(`Hint ${json.hintIndex + 1}/${json.hintsTotal}${json.hintsExhausted ? " (final)" : ""}`);
+   296→      }
+   297→    } catch (e) {
+   298→      toast.error("Failed to get AI reply", { description: (e as Error).message });
+   299→    } finally {
+   300→      setSending(false);
+   301→    }
+   302→  };
+   303→
+   304→  const runTests = async () => {
+   305→    if (!activeSession || activeSession.type !== "technical") return;
+   306→    if (!code.trim()) {
+   307→      toast.warning("Write some code first");
+   308→      return;
+   309→    }
+   310→    setRunningTests(true);
+   311→    try {
+   312→      const res = await fetch(`/api/interviews/${activeSession.id}/run-tests`, {
+   313→        method: "POST",
+   314→        headers: { "Content-Type": "application/json" },
+   315→        body: JSON.stringify({ code }),
+   316→      });
+   317→      const json = await res.json();
+   318→      if (!res.ok) throw new Error(json.error || "Failed to run tests");
+   319→      setTestResults(json);
+   320→      if (json.passedCount === json.totalCount) {
+   321→        toast.success(`All ${json.totalCount} tests passed`);
+   322→      } else {
+   323→        toast.warning(`${json.passedCount}/${json.totalCount} tests passed`);
+   324→      }
+   325→    } catch (e) {
+   326→      toast.error("Failed to run tests", { description: (e as Error).message });
+   327→    } finally {
+   328→      setRunningTests(false);
+   329→    }
+   330→  };
+   331→
+   332→  const submit = async () => {
+   333→    if (!activeSession) return;
+   334→    const payload =
+   335→      activeSession.type === "technical"
+   336→        ? code.trim()
+   337→        : chatInput.trim() || (activeSession.messages.find((m) => m.role === "user")?.content ?? "");
+   338→    if (!payload) {
+   339→      toast.warning(
+   340→        activeSession.type === "technical"
+   341→          ? "Write some code before submitting"
+   342→          : "Type your answer (200-500 words) before submitting",
+   343→      );
+   344→      return;
+   345→    }
+   346→    setSubmitting(true);
+   347→    try {
+   348→      const res = await fetch(`/api/interviews/${activeSession.id}/submit`, {
+   349→        method: "POST",
+   350→        headers: { "Content-Type": "application/json" },
+   351→        body: JSON.stringify({ code: payload }),
+   352→      });
+   353→      const json = await res.json();
+   354→      if (!res.ok) throw new Error(json.error || "Failed to submit");
+   355→      setActiveSession((s) =>
+   356→        s
+   357→          ? {
+   358→              ...s,
+   359→              status: "completed",
+   360→              score: json.score,
+   361→              scoreBreakdown: json.breakdown,
+   362→              feedback: json.feedback,
+   363→              complexityReported: json.footer
+   364→                ? `time: ${json.footer.timeComplexity}, space: ${json.footer.spaceComplexity}`
+   365→                : s.complexityReported,
+   366→              messages:
+   367→                s.type === "behavioral"
+   368→                  ? [...s.messages, { role: "assistant", content: json.feedback }]
+   369→                  : s.messages,
+   370→            }
+   371→          : s,
+   372→      );
+   373→      if (json.testResults) setTestResults(json.testResults);
+   374→      setRecommended(json.recommendedNext);
+   375→      toast.success(`Submitted — score: ${json.score}/100`);
+   376→      loadStats();
+   377→    } catch (e) {
+   378→      toast.error("Failed to submit", { description: (e as Error).message });
+   379→    } finally {
+   380→      setSubmitting(false);
+   381→    }
+   382→  };
+   383→
+   384→  const resetSession = () => {
+   385→    setActiveSession(null);
+   386→    setCode("");
+   387→    setChatInput("");
+   388→    setTestResults(null);
+   389→    setRecommended(null);
+   390→  };
+   391→
+   392→  // --- render --------------------------------------------------------------
+   393→
+   394→  return (
+   395→    <div className="min-h-screen flex flex-col bg-background">
+   396→      <Header />
+   397→      <main className="flex-1 w-full max-w-[1600px] mx-auto px-3 sm:px-6 py-4">
+   398→        <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+   399→          {/* LEFT COLUMN — dashboard */}
+   400→          <aside className="lg:col-span-3 flex flex-col gap-4">
+   401→            <Card>
+   402→              <CardHeader className="pb-3">
+   403→                <CardTitle className="text-base flex items-center gap-2">
+   404→                  <ListChecks className="size-4" /> Problem Bank
+   405→                </CardTitle>
+   406→                <CardDescription className="text-xs">
+   407→                  {problems.length} problems — pick one to start
+   408→                </CardDescription>
+   409→              </CardHeader>
+   410→              <CardContent className="space-y-3 pt-0">
+   411→                <div className="grid grid-cols-2 gap-2">
+   412→                  <div>
+   413→                    <Label className="text-[10px] uppercase tracking-wide text-muted-foreground">
+   414→                      Difficulty
+   415→                    </Label>
+   416→                    <Select value={filterDiff} onValueChange={(v) => setFilterDiff(v as any)}>
+   417→                      <SelectTrigger className="h-8 text-xs mt-1">
+   418→                        <SelectValue placeholder="all" />
+   419→                      </SelectTrigger>
+   420→                      <SelectContent>
+   421→                        <SelectItem value="all">all</SelectItem>
+   422→                        {DIFFICULTIES.map((d) => (
+   423→                          <SelectItem key={d} value={d}>{d}</SelectItem>
+   424→                        ))}
+   425→                      </SelectContent>
+   426→                    </Select>
+   427→                  </div>
+   428→                  <div>
+   429→                    <Label className="text-[10px] uppercase tracking-wide text-muted-foreground">
+   430→                      Category
+   431→                    </Label>
+   432→                    <Select value={filterCat} onValueChange={(v) => setFilterCat(v as any)}>
+   433→                      <SelectTrigger className="h-8 text-xs mt-1">
+   434→                        <SelectValue placeholder="all" />
+   435→                      </SelectTrigger>
+   436→                      <SelectContent>
+   437→                        <SelectItem value="all">all</SelectItem>
+   438→                        {CATEGORIES.map((c) => (
+   439→                          <SelectItem key={c} value={c}>{c}</SelectItem>
+   440→                        ))}
+   441→                      </SelectContent>
+   442→                    </Select>
+   443→                  </div>
+   444→                </div>
+   445→                <ScrollArea className="max-h-96 pr-2">
+   446→                  <div className="space-y-1.5">
+   447→                    {loadingProblems
+   448→                      ? Array.from({ length: 5 }).map((_, i) => (
+   449→                          <Skeleton key={i} className="h-12 w-full" />
+   450→                        ))
+   451→                      : problems.map((p) => (
+   452→                          <button
+   453→                            key={p.id}
+   454→                            onClick={() => startTechnical(p)}
+   455→                            disabled={startingSession}
+   456→                            className={cn(
+   457→                              "w-full text-left p-2 rounded-md border bg-card hover:bg-accent transition-colors",
+   458→                              "disabled:opacity-60 disabled:cursor-not-allowed",
+   459→                              activeSession?.problem?.id === p.id &&
+   460→                                "ring-2 ring-primary/40",
+   461→                            )}
+   462→                          >
+   463→                            <div className="flex items-center justify-between gap-2">
+   464→                              <span className="text-sm font-medium truncate">
+   465→                                {p.title}
+   466→                              </span>
+   467→                              <Badge
+   468→                                variant="outline"
+   469→                                className={cn(
+   470→                                  "text-[10px] px-1.5 py-0",
+   471→                                  DIFFICULTY_COLOR[p.difficulty],
+   472→                                )}
+   473→                              >
+   474→                                {p.difficulty}
+   475→                              </Badge>
+   476→                            </div>
+   477→                            <div className="text-[11px] text-muted-foreground mt-0.5">
+   478→                              {p.category} &middot; {p.testCasesCountLabel ?? ""}
+   479→                              {p.hints?.length ?? 0} hints
+   480→                            </div>
+   481→                          </button>
+   482→                        ))}
+   483→                    {!loadingProblems && problems.length === 0 && (
+   484→                      <p className="text-xs text-muted-foreground py-2 text-center">
+   485→                        No problems match your filter.
+   486→                      </p>
+   487→                    )}
+   488→                  </div>
+   489→                </ScrollArea>
+   490→              </CardContent>
+   491→            </Card>
+   492→
+   493→            <Card>
+   494→              <CardHeader className="pb-3">
+   495→                <CardTitle className="text-base flex items-center gap-2">
+   496→                  <Brain className="size-4" /> Behavioral Mode
+   497→                </CardTitle>
+   498→                <CardDescription className="text-xs">
+   499→                  AI asks a STAR-format behavioral question
+   500→                </CardDescription>
+   501→              </CardHeader>
+   502→              <CardContent className="pt-0">
+   503→                <Button
+   504→                  className="w-full"
+   505→                  onClick={startBehavioral}
+   506→                  disabled={startingSession}
+   507→                >
+   508→                  Start behavioral interview
+   509→                </Button>
+   510→              </CardContent>
+   511→            </Card>
+   512→
+   513→            {recommended && (
+   514→              <RecommendedNextCard
+   515→                rec={recommended}
+   516→                onStart={() => {
+   517→                  const p = problems.find((p) => p.slug === recommended.slug);
+   518→                  if (p) {
+   519→                    startTechnical(p);
+   520→                  } else {
+   521→                    // Load full problem then start.
+   522→                    fetch(`/api/problems/${recommended.slug}`)
+   523→                      .then((r) => r.json())
+   524→                      .then((json) => {
+   525→                        if (json.problem) startTechnical(json.problem);
+   526→                      })
+   527→                      .catch(() => toast.error("Failed to load recommended problem"));
+   528→                  }
+   529→                }}
+   530→              />
+   531→            )}
+   532→          </aside>
+   533→
+   534→          {/* CENTER COLUMN — interview */}
+   535→          <section className="lg:col-span-6 flex flex-col gap-4">
+   536→            {activeSession ? (
+   537→              <InterviewColumn
+   538→                session={activeSession}
+   539→                code={code}
+   540→                setCode={setCode}
+   541→                chatInput={chatInput}
+   542→                setChatInput={setChatInput}
+   543→                sending={sending}
+   544→                runningTests={runningTests}
+   545→                submitting={submitting}
+   546→                onSend={() => sendMessage(false)}
+   547→                onHint={() => sendMessage(true)}
+   548→                onRunTests={runTests}
+   549→                onSubmit={submit}
+   550→                onReset={resetSession}
+   551→                testResults={testResults}
+   552→              />
+   553→            ) : (
+   554→              <EmptyStateColumn
+   555→                startingSession={startingSession}
+   556→                onStartBehavioral={startBehavioral}
+   557→              />
+   558→            )}
+   559→          </section>
+   560→
+   561→          {/* RIGHT COLUMN — score + stats */}
+   562→          <aside className="lg:col-span-3 flex flex-col gap-4">
+   563→            <ScoreCard session={activeSession} recommended={recommended} onReset={resetSession} />
+   564→            <StatsCard stats={stats} />
+   565→          </aside>
+   566→        </div>
+   567→      </main>
+   568→      <footer className="mt-auto border-t bg-card py-3 text-center text-xs text-muted-foreground">
+   569→        AI-Powered Coding Interview Prep &mdash; MVP &middot; runs your code in a
+   570→        sandboxed bun subprocess (5s timeout) &middot; see README for
+   571→        production sandboxing guidance.
+   572→      </footer>
+   573→    </div>
+   574→  );
+   575→}
+   576→
+   577→// --- header ----------------------------------------------------------------
+   578→
+   579→function Header() {
+   580→  return (
+   581→    <header className="border-b bg-card sticky top-0 z-10">
+   582→      <div className="max-w-[1600px] mx-auto px-3 sm:px-6 py-3 flex items-center justify-between">
+   583→        <div className="flex items-center gap-2">
+   584→          <Sparkles className="size-5 text-primary" />
+   585→          <div>
+   586→            <h1 className="text-base sm:text-lg font-semibold leading-tight">
+   587→              AI Coding Interview Prep
+   588→            </h1>
+   589→            <p className="text-[11px] text-muted-foreground hidden sm:block">
+   590→              Mock technical + behavioral interviews, real-time feedback, performance scoring.
+   591→            </p>
+   592→          </div>
+   593→        </div>
+   594→        <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+   595→          <Badge variant="outline" className="text-[10px]">
+   596→            <Code2 className="size-3 mr-1" /> TypeScript
+   597→          </Badge>
+   598→          <Badge variant="outline" className="text-[10px] hidden sm:flex">
+   599→            <Brain className="size-3 mr-1" /> AI Interviewer
+   600→          </Badge>
+   601→        </div>
+   602→      </div>
+   603→    </header>
+   604→  );
+   605→}
+   606→
+   607→// --- recommended-next card -------------------------------------------------
+   608→
+   609→function RecommendedNextCard({ rec, onStart }: { rec: any; onStart: () => void }) {
+   610→  return (
+   611→    <Card className="border-primary/30 bg-primary/5">
+   612→      <CardHeader className="pb-3">
+   613→        <CardTitle className="text-base flex items-center gap-2">
+   614→          <TrendingDown className="size-4 text-primary" /> Recommended Next
+   615→        </CardTitle>
+   616→        <CardDescription className="text-xs">{rec.reason}</CardDescription>
+   617→      </CardHeader>
+   618→      <CardContent className="pt-0 space-y-2">
+   619→        <div className="flex items-center justify-between gap-2">
+   620→          <span className="text-sm font-medium truncate">{rec.title}</span>
+   621→          <Badge
+   622→            variant="outline"
+   623→            className={cn("text-[10px] px-1.5 py-0", DIFFICULTY_COLOR[rec.difficulty as Difficulty])}
+   624→          >
+   625→            {rec.difficulty}
+   626→          </Badge>
+   627→        </div>
+   628→        <Button className="w-full" size="sm" onClick={onStart}>
+   629→          Start this interview <ChevronRight className="size-3.5 ml-1" />
+   630→        </Button>
+   631→      </CardContent>
+   632→    </Card>
+   633→  );
+   634→}
+   635→
+   636→// --- empty state (no active session) ---------------------------------------
+   637→
+   638→function EmptyStateColumn({
+   639→  startingSession,
+   640→  onStartBehavioral,
+   641→}: {
+   642→  startingSession: boolean;
+   643→  onStartBehavioral: () => void;
+   644→}) {
+   645→  return (
+   646→    <Card className="flex-1 min-h-[600px] flex flex-col items-center justify-center text-center">
+   647→      <CardContent className="space-y-4 max-w-md">
+   648→        <div className="size-16 mx-auto rounded-full bg-primary/10 flex items-center justify-center">
+   649→          <Sparkles className="size-8 text-primary" />
+   650→        </div>
+   651→        <h2 className="text-xl font-semibold">Ready when you are</h2>
+   652→        <p className="text-sm text-muted-foreground">
+   653→          Pick a problem from the left to start a technical mock interview, or
+   654→          start a behavioral interview to practice STAR-format answers. The AI
+   655→          interviewer will introduce itself, ask if you have questions, then
+   656→          guide you through the problem with progressive hints.
+   657→        </p>
+   658→        <div className="flex flex-col sm:flex-row gap-2 justify-center">
+   659→          <Button onClick={onStartBehavioral} disabled={startingSession}>
+   660→            <Brain className="size-4 mr-2" /> Start behavioral interview
+   661→          </Button>
+   662→        </div>
+   663→      </CardContent>
+   664→    </Card>
+   665→  );
+   666→}
+   667→
+   668→// --- interview column (chat + code + test results) -------------------------
+   669→
+   670→function InterviewColumn({
+   671→  session,
+   672→  code,
+   673→  setCode,
+   674→  chatInput,
+   675→  setChatInput,
+   676→  sending,
+   677→  runningTests,
+   678→  submitting,
+   679→  onSend,
+   680→  onHint,
+   681→  onRunTests,
+   682→  onSubmit,
+   683→  onReset,
+   684→  testResults,
+   685→}: {
+   686→  session: Session;
+   687→  code: string;
+   688→  setCode: (s: string) => void;
+   689→  chatInput: string;
+   690→  setChatInput: (s: string) => void;
+   691→  sending: boolean;
+   692→  runningTests: boolean;
+   693→  submitting: boolean;
+   694→  onSend: () => void;
+   695→  onHint: () => void;
+   696→  onRunTests: () => void;
+   697→  onSubmit: () => void;
+   698→  onReset: () => void;
+   699→  testResults: TestRunResponse | null;
+   700→}) {
+   701→  const isTechnical = session.type === "technical";
+   702→  return (
+   703→    <Card className="flex-1 flex flex-col">
+   704→      <CardHeader className="pb-3 flex-row items-start justify-between">
+   705→        <div>
+   706→          <CardTitle className="text-base flex items-center gap-2">
+   707→            {isTechnical ? (
+   708→              <>
+   709→                <Code2 className="size-4" /> Technical Interview
+   710→              </>
+   711→            ) : (
+   712→              <>
+   713→                <Brain className="size-4" /> Behavioral Interview
+   714→              </>
+   715→            )}
+   716→            {session.status === "completed" && (
+   717→              <Badge variant="secondary" className="text-[10px]">completed</Badge>
+   718→            )}
+   719→          </CardTitle>
+   720→          <CardDescription className="text-xs mt-0.5">
+   721→            {isTechnical && session.problem
+   722→              ? `${session.problem.title} (${session.problem.difficulty}, ${session.problem.category})`
+   723→              : session.behavioralQuestion
+   724→                ? session.behavioralQuestion.slice(0, 80) + "..."
+   725→                : "Session"}
+   726→            {"  "}  &middot; {session.hintsUsedCount} hint{session.hintsUsedCount === 1 ? "" : "s"} used
+   727→          </CardDescription>
+   728→        </div>
+   729→        <Button variant="ghost" size="sm" onClick={onReset}>
+   730→          <RefreshCw className="size-3.5" /> New
+   731→        </Button>
+   732→      </CardHeader>
+   733→      <CardContent className="pt-0 flex-1 flex flex-col gap-4">
+   734→        {isTechnical && session.problem && (
+   735→          <details className="text-xs border rounded-md p-2 bg-muted/30">
+   736→            <summary className="cursor-pointer font-medium">
+   737→              Problem statement ({session.problem.signature})
+   738→            </summary>
+   739→            <div className="mt-2 prose prose-sm max-w-none whitespace-pre-wrap text-foreground/90">
+   740→              {session.problem.statement}
+   741→            </div>
+   742→            <div className="mt-2 text-[11px] text-muted-foreground">
+   743→              Function signature:
+   744→              <pre className="font-mono mt-1 text-[11px] bg-muted/50 p-2 rounded">
+   745→                {session.problem.signature}
+   746→              </pre>
+   747→            </div>
+   748→          </details>
+   749→        )}
+   750→
+   751→        <Tabs defaultValue="chat" className="flex-1 flex flex-col">
+   752→          <TabsList className="grid w-full" style={{ gridTemplateColumns: isTechnical ? "1fr 1fr 1fr" : "1fr" }}>
+   753→            <TabsTrigger value="chat" className="text-xs">
+   754→              <MessageSquare className="size-3.5 mr-1" /> Chat
+   755→            </TabsTrigger>
+   756→            {isTechnical && (
+   757→              <TabsTrigger value="code" className="text-xs">
+   758→                <Code2 className="size-3.5 mr-1" /> Code
+   759→              </TabsTrigger>
+   760→            )}
+   761→            {isTechnical && (
+   762→              <TabsTrigger value="tests" className="text-xs">
+   763→                <ListChecks className="size-3.5 mr-1" /> Tests
+   764→              </TabsTrigger>
+   765→            )}
+   766→          </TabsList>
+   767→
+   768→          {/* CHAT TAB */}
+   769→          <TabsContent value="chat" className="flex-1 flex flex-col mt-2 min-h-0">
+   770→            <ScrollArea className="flex-1 min-h-[300px] max-h-[460px] border rounded-md p-3 bg-muted/10">
+   771→              <div className="space-y-3">
+   772→                {session.messages.map((m, i) => (
+   773→                  <MessageBubble key={m.id ?? i} message={m} />
+   774→                ))}
+   775→                {sending && (
+   776→                  <div className="text-xs text-muted-foreground animate-pulse pl-9">
+   777→                    AI is typing...
+   778→                  </div>
+   779→                )}
+   780→              </div>
+   781→            </ScrollArea>
+   782→            <div className="mt-3 space-y-2">
+   783→              <Textarea
+   784→                value={chatInput}
+   785→                onChange={(e) => setChatInput(e.target.value)}
+   786→                placeholder={
+   787→                  isTechnical
+   788→                    ? "Ask the interviewer a question..."
+   789→                    : "Type your answer here (200-500 words, STAR format)..."
+   790→                }
+   791→                rows={isTechnical ? 2 : 6}
+   792→                className="resize-y"
+   793→                onKeyDown={(e) => {
+   794→                  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+   795→                    e.preventDefault();
+   796→                    onSend();
+   797→                  }
+   798→                }}
+   799→              />
+   800→              <div className="flex flex-wrap items-center gap-2">
+   801→                <Button size="sm" onClick={onSend} disabled={sending || !chatInput.trim()}>
+   802→                  <Send className="size-3.5 mr-1" /> Send
+   803→                </Button>
+   804→                {isTechnical && (
+   805→                  <Button
+   806→                    size="sm"
+   807→                    variant="outline"
+   808→                    onClick={onHint}
+   809→                    disabled={sending}
+   810→                  >
+   811→                    <Lightbulb className="size-3.5 mr-1" /> I'm stuck — hint please
+   812→                  </Button>
+   813→                )}
+   814→                <span className="text-[10px] text-muted-foreground ml-auto">
+   815→                  Ctrl+Enter to send
+   816→                </span>
+   817→              </div>
+   818→            </div>
+   819→          </TabsContent>
+   820→
+   821→          {/* CODE TAB */}
+   822→          {isTechnical && (
+   823→            <TabsContent value="code" className="flex-1 flex flex-col mt-2 min-h-0">
+   824→              <Label className="text-[10px] uppercase tracking-wide text-muted-foreground mb-1">
+   825→                Your solution (TypeScript)
+   826→              </Label>
+   827→              <Textarea
+   828→                value={code}
+   829→                onChange={(e) => setCode(e.target.value)}
+   830→                rows={18}
+   831→                className="font-mono text-xs resize-y min-h-[300px]"
+   832→                spellCheck={false}
+   833→                placeholder={`function twoSum(nums: number[], target: number): number[] {\n  // your code here\n}`}
+   834→              />
+   835→              <div className="mt-3 flex flex-wrap items-center gap-2">
+   836→                <Button size="sm" onClick={onRunTests} disabled={runningTests}>
+   837→                  {runningTests ? (
+   838→                    <>
+   839→                      <RefreshCw className="size-3.5 mr-1 animate-spin" /> Running...
+   840→                    </>
+   841→                  ) : (
+   842→                    <>
+   843→                      <Play className="size-3.5 mr-1" /> Run tests
+   844→                    </>
+   845→                  )}
+   846→                </Button>
+   847→                <Button
+   848→                  size="sm"
+   849→                  variant="default"
+   850→                  onClick={onSubmit}
+   851→                  disabled={submitting || session.status === "completed"}
+   852→                >
+   853→                  {submitting ? (
+   854→                    <>
+   855→                      <RefreshCw className="size-3.5 mr-1 animate-spin" /> Submitting...
+   856→                    </>
+   857→                  ) : (
+   858→                    <>
+   859→                      <Trophy className="size-3.5 mr-1" /> Submit solution
+   860→                    </>
+   861→                  )}
+   862→                </Button>
+   863→                {session.status === "completed" && (
+   864→                  <Badge variant="secondary" className="text-[10px]">
+   865→                    already submitted
+   866→                  </Badge>
+   867→                )}
+   868→              </div>
+   869→            </TabsContent>
+   870→          )}
+   871→
+   872→          {/* TESTS TAB */}
+   873→          {isTechnical && (
+   874→            <TabsContent value="tests" className="flex-1 flex flex-col mt-2 min-h-0">
+   875→              <TestResultsPanel results={testResults} running={runningTests} />
+   876→            </TabsContent>
+   877→          )}
+   878→        </Tabs>
+   879→      </CardContent>
+   880→    </Card>
+   881→  );
+   882→}
+   883→
+   884→function MessageBubble({ message }: { message: Message }) {
+   885→  const isUser = message.role === "user";
+   886→  const isSystem = message.role === "system";
+   887→  if (isSystem) return null; // system prompts are not shown in the chat UI
+   888→  return (
+   889→    <div className={cn("flex gap-2", isUser ? "justify-end" : "justify-start")}>
+   890→      {!isUser && (
+   891→        <div className="size-6 rounded-full bg-primary/10 flex items-center justify-center shrink-0 mt-0.5">
+   892→          <Sparkles className="size-3 text-primary" />
+   893→        </div>
+   894→      )}
+   895→      <div
+   896→        className={cn(
+   897→          "max-w-[80%] rounded-lg px-3 py-2 text-sm whitespace-pre-wrap",
+   898→          isUser
+   899→            ? "bg-primary text-primary-foreground"
+   900→            : "bg-muted text-foreground border",
+   901→        )}
+   902→      >
+   903→        {message.content}
+   904→      </div>
+   905→      {isUser && (
+   906→        <div className="size-6 rounded-full bg-secondary flex items-center justify-center shrink-0 mt-0.5">
+   907→          <Hash className="size-3" />
+   908→        </div>
+   909→      )}
+   910→    </div>
+   911→  );
+   912→}
+   913→
+   914→function TestResultsPanel({
+   915→  results,
+   916→  running,
+   917→}: {
+   918→  results: TestRunResponse | null;
+   919→  running: boolean;
+   920→}) {
+   921→  if (running) {
+   922→    return (
+   923→      <div className="flex-1 flex flex-col items-center justify-center text-sm text-muted-foreground gap-3">
+   924→        <RefreshCw className="size-6 animate-spin" />
+   925→        Running your code in a sandboxed bun subprocess (5s timeout)...
+   926→      </div>
+   927→    );
+   928→  }
+   929→  if (!results) {
+   930→    return (
+   931→      <div className="flex-1 flex flex-col items-center justify-center text-sm text-muted-foreground gap-2 min-h-[300px]">
+   932→        <ListChecks className="size-8 opacity-50" />
+   933→        Click "Run tests" to execute your code against the problem's unit tests.
+   934→      </div>
+   935→    );
+   936→  }
+   937→  const pct = results.totalCount > 0 ? (results.passedCount / results.totalCount) * 100 : 0;
+   938→  return (
+   939→    <ScrollArea className="flex-1 min-h-[300px] border rounded-md">
+   940→      <div className="p-3 space-y-3">
+   941→        <div className="flex items-center justify-between">
+   942→          <span className="text-sm font-medium">
+   943→            {results.passedCount} / {results.totalCount} tests passed
+   944→          </span>
+   945→          <Badge
+   946→            variant="outline"
+   947→            className={cn(
+   948→              "text-[10px]",
+   949→              results.passedCount === results.totalCount
+   950→                ? "bg-emerald-50 text-emerald-700 border-emerald-300"
+   951→                : "bg-amber-50 text-amber-700 border-amber-300",
+   952→            )}
+   953→          >
+   954→            {Math.round(pct)}%
+   955→          </Badge>
+   956→        </div>
+   957→        <Progress value={pct} className="h-1.5" />
+   958→        {results.compileError && (
+   959→          <div className="text-xs border border-destructive/30 bg-destructive/5 text-destructive p-2 rounded font-mono whitespace-pre-wrap">
+   960→            {results.compileError}
+   961→          </div>
+   962→        )}
+   963→        {results.timedOut && (
+   964→          <div className="text-xs border border-amber-300 bg-amber-50 text-amber-800 p-2 rounded">
+   965→            Execution timed out after 5 seconds.
+   966→          </div>
+   967→        )}
+   968→        <Separator />
+   969→        <div className="space-y-2">
+   970→          {results.results.map((r, i) => (
+   971→            <div
+   972→              key={i}
+   973→              className={cn(
+   974→                "border rounded-md p-2 text-xs",
+   975→                r.passed ? "border-emerald-200 bg-emerald-50/50" : "border-rose-200 bg-rose-50/50",
+   976→              )}
+   977→            >
+   978→              <div className="flex items-center gap-2 font-medium">
+   979→                {r.passed ? (
+   980→                  <CheckCircle2 className="size-3.5 text-emerald-600" />
+   981→                ) : (
+   982→                  <XCircle className="size-3.5 text-rose-600" />
+   983→                )}
+   984→                {r.name}
+   985→              </div>
+   986→              {!r.passed && (
+   987→                <div className="mt-1 font-mono text-[11px] text-muted-foreground space-y-0.5">
+   988→                  <div>expected: <span className="text-foreground">{r.expected}</span></div>
+   989→                  <div>actual: <span className="text-foreground">{r.actual || "(no value)"}</span></div>
+   990→                  {r.error && (
+   991→                    <div className="text-rose-700 whitespace-pre-wrap">{r.error}</div>
+   992→                  )}
+   993→                </div>
+   994→              )}
+   995→            </div>
+   996→          ))}
+   997→        </div>
+   998→      </div>
+   999→    </ScrollArea>
+  1000→  );
+  1001→}
+  1002→
+  1003→// --- score card (right column) ---------------------------------------------
+  1004→
+  1005→function ScoreCard({
+  1006→  session,
+  1007→  recommended,
+  1008→  onReset,
+  1009→}: {
+  1010→  session: Session | null;
+  1011→  recommended: any | null;
+  1012→  onReset: () => void;
+  1013→}) {
+  1014→  if (!session) {
+  1015→    return (
+  1016→      <Card>
+  1017→        <CardHeader className="pb-3">
+  1018→          <CardTitle className="text-base flex items-center gap-2">
+  1019→            <Trophy className="size-4" /> Session Score
+  1020→          </CardTitle>
+  1021→        </CardHeader>
+  1022→        <CardContent className="pt-0">
+  1023→          <p className="text-sm text-muted-foreground">
+  1024→            Submit a solution to see your score and breakdown.
+  1025→          </p>
+  1026→        </CardContent>
+  1027→      </Card>
+  1028→    );
+  1029→  }
+  1030→  const score = session.score ?? null;
+  1031→  const breakdown = session.scoreBreakdown ?? null;
+  1032→  const isBehavioral = session.type === "behavioral";
+  1033→  return (
+  1034→    <Card>
+  1035→      <CardHeader className="pb-3">
+  1036→        <CardTitle className="text-base flex items-center gap-2">
+  1037→          <Trophy className="size-4" /> Session Score
+  1038→        </CardTitle>
+  1039→        <CardDescription className="text-xs">
+  1040→          {session.status === "completed" ? "Final score" : "Submit to compute score"}
+  1041→        </CardDescription>
+  1042→      </CardHeader>
+  1043→      <CardContent className="pt-0 space-y-3">
+  1044→        {score !== null ? (
+  1045→          <>
+  1046→            <div className="flex items-baseline gap-2">
+  1047→              <span className="text-4xl font-bold tabular-nums">{score}</span>
+  1048→              <span className="text-sm text-muted-foreground">/ 100</span>
+  1049→              <Badge variant="outline" className="text-[10px] ml-auto">
+  1050→                {letterGrade(score)}
+  1051→              </Badge>
+  1052→            </div>
+  1053→            <Progress value={score} className="h-2" />
+  1054→            {breakdown && !isBehavioral && (
+  1055→              <div className="text-xs space-y-1">
+  1056→                <div className="flex justify-between">
+  1057→                  <span>Tests passed (50)</span>
+  1058→                  <span className="font-mono">{breakdown.testsScore}</span>
+  1059→                </div>
+  1060→                <div className="flex justify-between">
+  1061→                  <span>Speed (20)</span>
+  1062→                  <span className="font-mono">{breakdown.speedScore}</span>
+  1063→                </div>
+  1064→                <div className="flex justify-between">
+  1065→                  <span>Hints (15)</span>
+  1066→                  <span className="font-mono">{breakdown.hintsScore}</span>
+  1067→                </div>
+  1068→                <div className="flex justify-between">
+  1069→                  <span>Complexity (15)</span>
+  1070→                  <span className="font-mono">{breakdown.complexityScore}</span>
+  1071→                </div>
+  1072→              </div>
+  1073→            )}
+  1074→            {breakdown && isBehavioral && (
+  1075→              <div className="text-xs">
+  1076→                <div className="flex justify-between">
+  1077→                  <span>STAR rating</span>
+  1078→                  <span className="font-mono">{breakdown.star}/5</span>
+  1079→                </div>
+  1080→              </div>
+  1081→            )}
+  1082→            {session.complexityReported && (
+  1083→              <div className="text-[11px] text-muted-foreground">
+  1084→                Complexity: {session.complexityReported}
+  1085→              </div>
+  1086→            )}
+  1087→          </>
+  1088→        ) : (
+  1089→          <p className="text-sm text-muted-foreground">
+  1090→            Score will appear after you submit.
+  1091→          </p>
+  1092→        )}
+  1093→        {session.feedback && (
+  1094→          <details className="text-xs border rounded-md p-2 bg-muted/30">
+  1095→            <summary className="cursor-pointer font-medium">AI feedback</summary>
+  1096→            <div className="mt-2 whitespace-pre-wrap text-foreground/90 max-h-60 overflow-y-auto">
+  1097→              {session.feedback}
+  1098→            </div>
+  1099→          </details>
+  1100→        )}
+  1101→        {recommended && (
+  1102→          <div className="text-xs border border-primary/30 bg-primary/5 rounded-md p-2">
+  1103→            <div className="font-medium flex items-center gap-1">
+  1104→              <TrendingDown className="size-3" /> Recommended next:
+  1105→            </div>
+  1106→            <div className="mt-1">{recommended.title} ({recommended.difficulty})</div>
+  1107→            <div className="text-muted-foreground text-[11px] mt-0.5">{recommended.reason}</div>
+  1108→            <Button size="sm" className="w-full mt-2" onClick={onReset}>
+  1109→              Start new session to try it
+  1110→            </Button>
+  1111→          </div>
+  1112→        )}
+  1113→      </CardContent>
+  1114→    </Card>
+  1115→  );
+  1116→}
+  1117→
+  1118→function letterGrade(score: number): string {
+  1119→  if (score >= 90) return "A";
+  1120→  if (score >= 80) return "B";
+  1121→  if (score >= 70) return "C";
+  1122→  if (score >= 60) return "D";
+  1123→  return "F";
+  1124→}
+  1125→
+  1126→// --- stats card (right column) ---------------------------------------------
+  1127→
+  1128→function StatsCard({ stats }: { stats: Stats | null }) {
+  1129→  return (
+  1130→    <Card>
+  1131→      <CardHeader className="pb-3">
+  1132→        <CardTitle className="text-base flex items-center gap-2">
+  1133→          <BarChart3 className="size-4" /> Your Stats
+  1134→        </CardTitle>
+  1135→        <CardDescription className="text-xs">
+  1136→          Aggregate across all completed sessions
+  1137→        </CardDescription>
+  1138→      </CardHeader>
+  1139→      <CardContent className="pt-0 space-y-3">
+  1140→        {!stats ? (
+  1141→          <Skeleton className="h-20 w-full" />
+  1142→        ) : (
+  1143→          <>
+  1144→            <div className="grid grid-cols-3 gap-2 text-center">
+  1145→              <StatBox label="Sessions" value={stats.sessionsCompleted} />
+  1146→              <StatBox label="Avg score" value={stats.avgScore} />
+  1147→              <StatBox label="Hints/sess" value={stats.hintsPerSessionAvg} />
+  1148→            </div>
+  1149→            <Separator />
+  1150→            <div>
+  1151→              <div className="text-xs font-medium mb-1.5">Weak spots (by category)</div>
+  1152→              {stats.weakness.length === 0 ? (
+  1153→                <p className="text-xs text-muted-foreground">
+  1154→                  No weak spots yet — complete a few sessions to see where to focus.
+  1155→                </p>
+  1156→              ) : (
+  1157→                <div className="space-y-1.5">
+  1158→                  {stats.weakness.slice(0, 5).map((w) => (
+  1159→                    <div key={w.category} className="flex items-center gap-2">
+  1160→                      <span className="text-xs flex-1 truncate">{w.category}</span>
+  1161→                      <Progress
+  1162→                        value={Math.min(100, w.count * 25)}
+  1163→                        className="h-1.5 flex-1"
+  1164→                      />
+  1165→                      <span className="text-xs font-mono w-6 text-right">{w.count}</span>
+  1166→                    </div>
+  1167→                  ))}
+  1168→                </div>
+  1169→              )}
+  1170→            </div>
+  1171→          </>
+  1172→        )}
+  1173→      </CardContent>
+  1174→    </Card>
+  1175→  );
+  1176→}
+  1177→
+  1178→function StatBox({ label, value }: { label: string; value: number }) {
+  1179→  return (
+  1180→    <div className="border rounded-md p-2 bg-muted/20">
+  1181→      <div className="text-lg font-semibold tabular-nums">
+  1182→        {value}
+  1183→      </div>
+  1184→      <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
+  1185→        {label}
+  1186→      </div>
+  1187→    </div>
+  1188→  );
+  1189→}
+  1190→
+  1191→// --- helpers ---------------------------------------------------------------
+  1192→
+  1193→function starterCode(problem: Problem | null | undefined): string {
+  1194→  if (!problem) return "";
+  1195→  // Convert "function twoSum(nums: number[], target: number): number[]"
+  1196→  // into a stub with a throw statement.
+  1197→  const sig = problem.signature;
+  1198→  const bodyMatch = sig.match(/\)\s*(?::\s*[^{]+)?\s*\{?\s*$/);
+  1199→  if (sig.includes("{")) return sig + "\n}";
+  1200→  // No body in the signature — append an empty body with a TODO.
+  1201→  const sigWithReturn = sig.endsWith(")") ? `${sig} {` : sig;
+  1202→  return `${sigWithReturn}
+  1203→  // TODO: implement me
+  1204→  throw new Error("not implemented");
+  1205→}
+  1206→`;
+  1207→}
+  1208→

@@ -1,0 +1,955 @@
+     1→'use client'
+     2→
+     3→import * as React from 'react'
+     4→import { useToast } from '@/hooks/use-toast'
+     5→import { Button } from '@/components/ui/button'
+     6→import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
+     7→import { Input } from '@/components/ui/input'
+     8→import { Textarea } from '@/components/ui/textarea'
+     9→import { Badge } from '@/components/ui/badge'
+    10→import { ScrollArea } from '@/components/ui/scroll-area'
+    11→import { Separator } from '@/components/ui/separator'
+    12→import { Label } from '@/components/ui/label'
+    13→import { Skeleton } from '@/components/ui/skeleton'
+    14→import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
+    15→import {
+    16→  Dialog,
+    17→  DialogContent,
+    18→  DialogHeader,
+    19→  DialogTitle,
+    20→  DialogDescription,
+    21→  DialogFooter,
+    22→} from '@/components/ui/dialog'
+    23→import {
+    24→  BookOpen,
+    25→  Plus,
+    26→  Trash2,
+    27→  Send,
+    28→  Loader2,
+    29→  Search,
+    30→  ShieldCheck,
+    31→  ShieldAlert,
+    32→  LayoutDashboard,
+    33→  History,
+    34→  FileText,
+    35→  Database,
+    36→  UserCircle2,
+    37→  Sparkles,
+    38→  ExternalLink,
+    39→  CornerDownLeft,
+    40→} from 'lucide-react'
+    41→
+    42→// ---------- types ----------
+    43→interface User {
+    44→  id: string
+    45→  name: string
+    46→  email: string
+    47→  roles: string[]
+    48→}
+    49→interface WikiPage {
+    50→  id: string
+    51→  source: string
+    52→  title: string
+    53→  url: string | null
+    54→  accessTags: string[]
+    55→  ingestedAt: string
+    56→  _count: { chunks: number }
+    57→}
+    58→interface Citation {
+    59→  chunkId: string
+    60→  pageId: string
+    61→  pageSource: string
+    62→  pageTitle: string
+    63→  pageUrl: string | null
+    64→  accessTags: string[]
+    65→  preview: string
+    66→}
+    67→interface ChatMessage {
+    68→  id: string
+    69→  role: 'user' | 'assistant'
+    70→  content: string
+    71→  citations: Citation[]
+    72→  denied?: boolean
+    73→  pending?: boolean
+    74→}
+    75→interface AuditEntry {
+    76→  id: string
+    77→  userId: string
+    78→  query: string
+    79→  chunksReturned: number
+    80→  denied: boolean
+    81→  createdAt: string
+    82→}
+    83→interface AdminStats {
+    84→  totalUsers: number
+    85→  totalPages: number
+    86→  totalChunks: number
+    87→  perTag: Record<string, number>
+    88→  last10: AuditEntry[]
+    89→}
+    90→
+    91→// ---------- helpers ----------
+    92→const SOURCE_BADGE: Record<string, { label: string; cls: string }> = {
+    93→  'markdown-upload': { label: 'md', cls: 'bg-emerald-100 text-emerald-800 border-emerald-200' },
+    94→  confluence: { label: 'conf', cls: 'bg-sky-100 text-sky-800 border-sky-200' },
+    95→  notion: { label: 'notion', cls: 'bg-zinc-100 text-zinc-800 border-zinc-200' },
+    96→  slack: { label: 'slack', cls: 'bg-amber-100 text-amber-800 border-amber-200' },
+    97→  drive: { label: 'drive', cls: 'bg-yellow-100 text-yellow-800 border-yellow-200' },
+    98→}
+    99→const ROLE_COLORS: Record<string, string> = {
+   100→  engineering: 'bg-emerald-100 text-emerald-800 border-emerald-200',
+   101→  finance: 'bg-violet-100 text-violet-800 border-violet-200',
+   102→  executive: 'bg-rose-100 text-rose-800 border-rose-200',
+   103→  all: 'bg-zinc-900 text-white border-zinc-900',
+   104→}
+   105→function roleChipCls(role: string, active: boolean) {
+   106→  const base = ROLE_COLORS[role] ?? 'bg-muted text-foreground border-border'
+   107→  return `cursor-pointer select-none text-xs font-medium px-3 py-1 rounded-full border transition-all ${
+   108→    active ? 'ring-2 ring-ring/50 ring-offset-1 ' + base : 'bg-background text-muted-foreground border-border hover:bg-accent'
+   109→  }`
+   110→}
+   111→
+   112→function parseTags(s: string): string[] {
+   113→  return s.split(/[,\s]+/).map((t) => t.trim().toLowerCase()).filter(Boolean)
+   114→}
+   115→
+   116→function renderCitationsInline(content: string): React.ReactNode[] {
+   117→  // Replace [^c1] markers with clickable chips linked to the citation block.
+   118→  const parts: React.ReactNode[] = []
+   119→  const re = /\[\^(c\d+)\]/g
+   120→  let last = 0
+   121→  let m: RegExpExecArray | null
+   122→  while ((m = re.exec(content)) !== null) {
+   123→    if (m.index > last) {
+   124→      parts.push(<React.Fragment key={`t-${last}`}>{content.slice(last, m.index)}</React.Fragment>)
+   125→    }
+   126→    const id = m[1]
+   127→    parts.push(
+   128→      <a
+   129→        key={`c-${m.index}`}
+   130→        href={`#cite-${id}`}
+   131→        className="text-primary text-xs align-super mx-0.5 px-1 rounded bg-primary/10 hover:bg-primary/20 no-underline"
+   132→      >
+   133→        [{id}]
+   134→      </a>,
+   135→    )
+   136→    last = m.index + m[0].length
+   137→  }
+   138→  if (last < content.length) {
+   139→    parts.push(<React.Fragment key={`t-${last}`}>{content.slice(last)}</React.Fragment>)
+   140→  }
+   141→  return parts
+   142→}
+   143→
+   144→function fmtDate(s: string): string {
+   145→  const d = new Date(s)
+   146→  return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+   147→}
+   148→
+   149→// ---------- main ----------
+   150→export default function Home() {
+   151→  const { toast } = useToast()
+   152→
+   153→  // users + role picker state
+   154→  const [users, setUsers] = React.useState<User[]>([])
+   155→  const [currentUserId, setCurrentUserId] = React.useState<string>('')
+   156→  const [loadingUsers, setLoadingUsers] = React.useState(true)
+   157→  const [createUserOpen, setCreateUserOpen] = React.useState(false)
+   158→  const [newUserName, setNewUserName] = React.useState('')
+   159→  const [newUserEmail, setNewUserEmail] = React.useState('')
+   160→  const [newUserRoles, setNewUserRoles] = React.useState('engineering')
+   161→  const [creatingUser, setCreatingUser] = React.useState(false)
+   162→
+   163→  const currentUser = users.find((u) => u.id === currentUserId) ?? null
+   164→  const currentRoles = currentUser?.roles ?? []
+   165→
+   166→  // wiki pages (RBAC-filtered by user's roles)
+   167→  const [pages, setPages] = React.useState<WikiPage[]>([])
+   168→  const [loadingPages, setLoadingPages] = React.useState(false)
+   169→
+   170→  // add-page dialog
+   171→  const [addPageOpen, setAddPageOpen] = React.useState(false)
+   172→  const [newTitle, setNewTitle] = React.useState('')
+   173→  const [newContent, setNewContent] = React.useState('')
+   174→  const [newTags, setNewTags] = React.useState('engineering')
+   175→  const [importing, setImporting] = React.useState(false)
+   176→
+   177→  // chat state
+   178→  const [messages, setMessages] = React.useState<ChatMessage[]>([])
+   179→  const [sessionId, setSessionId] = React.useState<string | null>(null)
+   180→  const [composer, setComposer] = React.useState('')
+   181→  const [streaming, setStreaming] = React.useState(false)
+   182→  const chatScrollRef = React.useRef<HTMLDivElement | null>(null)
+   183→
+   184→  // right panel: tabs (chat / admin)
+   185→  const [rightTab, setRightTab] = React.useState<'chat' | 'admin'>('admin')
+   186→
+   187→  // admin dashboard
+   188→  const [stats, setStats] = React.useState<AdminStats | null>(null)
+   189→  const [loadingStats, setLoadingStats] = React.useState(false)
+   190→
+   191→  // ---------- fetch users on mount ----------
+   192→  React.useEffect(() => {
+   193→    let cancelled = false
+   194→    setLoadingUsers(true)
+   195→    fetch('/api/users')
+   196→      .then((r) => r.json())
+   197→      .then((data) => {
+   198→        if (cancelled) return
+   199→        const list: User[] = data.users ?? []
+   200→        setUsers(list)
+   201→        if (list.length && !currentUserId) setCurrentUserId(list[0].id)
+   202→      })
+   203→      .catch(() => {
+   204→        if (!cancelled) toast({ title: 'Could not load users', variant: 'destructive' })
+   205→      })
+   206→      .finally(() => {
+   207→        if (!cancelled) setLoadingUsers(false)
+   208→      })
+   209→    return () => {
+   210→      cancelled = true
+   211→    }
+   212→    // eslint-disable-next-line react-hooks/exhaustive-deps
+   213→  }, [])
+   214→
+   215→  // ---------- fetch pages when user changes ----------
+   216→  const refreshPages = React.useCallback(() => {
+   217→    if (!currentUserId) return
+   218→    setLoadingPages(true)
+   219→    fetch(`/api/wiki?userId=${encodeURIComponent(currentUserId)}`)
+   220→      .then((r) => r.json())
+   221→      .then((data) => setPages(data.pages ?? []))
+   222→      .catch(() => toast({ title: 'Could not load wiki pages', variant: 'destructive' }))
+   223→      .finally(() => setLoadingPages(false))
+   224→  }, [currentUserId, toast])
+   225→
+   226→  React.useEffect(() => {
+   227→    refreshPages()
+   228→  }, [refreshPages])
+   229→
+   230→  // ---------- fetch admin stats (polls every 15s while dashboard tab open) ----------
+   231→  const refreshStats = React.useCallback(() => {
+   232→    setLoadingStats(true)
+   233→    fetch('/api/admin/stats')
+   234→      .then((r) => r.json())
+   235→      .then((data) => setStats(data as AdminStats))
+   236→      .catch(() => {
+   237→        // silent — admin endpoint may fail if no DB yet
+   238→      })
+   239→      .finally(() => setLoadingStats(false))
+   240→  }, [])
+   241→
+   242→  React.useEffect(() => {
+   243→    refreshStats()
+   244→    const id = setInterval(refreshStats, 15000)
+   245→    return () => clearInterval(id)
+   246→  }, [refreshStats])
+   247→
+   248→  // ---------- scroll chat to bottom on new message ----------
+   249→  React.useEffect(() => {
+   250→    if (chatScrollRef.current) {
+   251→      chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight
+   252→    }
+   253→  }, [messages])
+   254→
+   255→  // ---------- create user ----------
+   256→  async function handleCreateUser() {
+   257→    if (!newUserName.trim() || !newUserEmail.trim()) {
+   258→      toast({ title: 'Name and email are required', variant: 'destructive' })
+   259→      return
+   260→    }
+   261→    setCreatingUser(true)
+   262→    try {
+   263→      const res = await fetch('/api/users', {
+   264→        method: 'POST',
+   265→        headers: { 'Content-Type': 'application/json' },
+   266→        body: JSON.stringify({ name: newUserName, email: newUserEmail, roles: parseTags(newUserRoles) }),
+   267→      })
+   268→      if (!res.ok) throw new Error((await res.json()).error ?? 'Failed')
+   269→      const data = await res.json()
+   270→      setUsers((prev) => [...prev, data.user])
+   271→      setCurrentUserId(data.user.id)
+   272→      setCreateUserOpen(false)
+   273→      setNewUserName('')
+   274→      setNewUserEmail('')
+   275→      setNewUserRoles('engineering')
+   276→      toast({ title: `Created ${data.user.name}` })
+   277→    } catch (e) {
+   278→      toast({ title: (e as Error).message, variant: 'destructive' })
+   279→    } finally {
+   280→      setCreatingUser(false)
+   281→    }
+   282→  }
+   283→
+   284→  // ---------- add page ----------
+   285→  async function handleAddPage() {
+   286→    if (!newTitle.trim() || !newContent.trim()) {
+   287→      toast({ title: 'Title and content are required', variant: 'destructive' })
+   288→      return
+   289→    }
+   290→    setImporting(true)
+   291→    try {
+   292→      const res = await fetch('/api/wiki/import', {
+   293→        method: 'POST',
+   294→        headers: { 'Content-Type': 'application/json' },
+   295→        body: JSON.stringify({
+   296→          title: newTitle,
+   297→          content: newContent,
+   298→          accessTags: parseTags(newTags),
+   299→          source: 'markdown-upload',
+   300→        }),
+   301→      })
+   302→      if (!res.ok) throw new Error((await res.json()).error ?? 'Failed')
+   303→      const data = await res.json()
+   304→      toast({ title: `Ingested "${newTitle}" — ${data.totalChunks} chunks` })
+   305→      setAddPageOpen(false)
+   306→      setNewTitle('')
+   307→      setNewContent('')
+   308→      refreshPages()
+   309→      refreshStats()
+   310→    } catch (e) {
+   311→      toast({ title: (e as Error).message, variant: 'destructive' })
+   312→    } finally {
+   313→      setImporting(false)
+   314→    }
+   315→  }
+   316→
+   317→  // ---------- delete page ----------
+   318→  async function handleDeletePage(pageId: string, title: string) {
+   319→    if (!confirm(`Delete wiki page "${title}"? This removes all its chunks.`)) return
+   320→    try {
+   321→      const res = await fetch(`/api/wiki/${pageId}`, { method: 'DELETE' })
+   322→      if (!res.ok) throw new Error('Failed')
+   323→      toast({ title: `Deleted "${title}"` })
+   324→      refreshPages()
+   325→      refreshStats()
+   326→    } catch (e) {
+   327→      toast({ title: (e as Error).message, variant: 'destructive' })
+   328→    }
+   329→  }
+   330→
+   331→  // ---------- send chat ----------
+   332→  async function handleSend() {
+   333→    const text = composer.trim()
+   334→    if (!text || !currentUserId || streaming) return
+   335→    setComposer('')
+   336→    setStreaming(true)
+   337→    const userMsgId = `u-${Date.now()}`
+   338→    const assistantMsgId = `a-${Date.now()}`
+   339→    setMessages((prev) => [
+   340→      ...prev,
+   341→      { id: userMsgId, role: 'user', content: text, citations: [] },
+   342→      { id: assistantMsgId, role: 'assistant', content: '', citations: [], pending: true },
+   343→    ])
+   344→
+   345→    try {
+   346→      const res = await fetch('/api/chat', {
+   347→        method: 'POST',
+   348→        headers: { 'Content-Type': 'application/json' },
+   349→        body: JSON.stringify({ message: text, sessionId: sessionId ?? undefined, userId: currentUserId }),
+   350→      })
+   351→      if (!res.ok) {
+   352→        const errText = await res.text()
+   353→        throw new Error(errText || `HTTP ${res.status}`)
+   354→      }
+   355→      if (!res.body) throw new Error('No stream body')
+   356→
+   357→      const newSessionId = res.headers.get('X-Session-Id')
+   358→      if (newSessionId) setSessionId(newSessionId)
+   359→
+   360→      const reader = res.body.getReader()
+   361→      const decoder = new TextDecoder()
+   362→      let buffer = ''
+   363→      let fullMessage = ''
+   364→      let denied = false
+   365→      let sawCitationsMarker = false
+   366→
+   367→      while (true) {
+   368→        const { done, value } = await reader.read()
+   369→        if (done) break
+   370→        buffer += decoder.decode(value, { stream: true })
+   371→
+   372→        // Special header: the server may prepend `---DENIED---\n` if safe-mode
+   373→        // fired (RBAC denied the user).
+   374→        if (!sawCitationsMarker && fullMessage === '' && buffer.startsWith('---DENIED---')) {
+   375→          denied = true
+   376→          const nl = buffer.indexOf('\n')
+   377→          if (nl >= 0) {
+   378→            buffer = buffer.slice(nl + 1)
+   379→          } else {
+   380→            buffer = ''
+   381→          }
+   382→        }
+   383→
+   384→        const splitIdx = buffer.indexOf('\n---CITATIONS---\n')
+   385→        let textChunk = buffer
+   386→        if (splitIdx >= 0) {
+   387→          textChunk = buffer.slice(0, splitIdx)
+   388→          sawCitationsMarker = true
+   389→          // The citations JSON follows
+   390→          const tail = buffer.slice(splitIdx + '\n---CITATIONS---\n'.length)
+   391→          buffer = ''
+   392→          fullMessage += textChunk
+   393→          // Update message with accumulated text
+   394→          setMessages((prev) =>
+   395→            prev.map((m) =>
+   396→              m.id === assistantMsgId ? { ...m, content: fullMessage, denied } : m,
+   397→            ),
+   398→          )
+   399→          // Try parsing the trailing JSON to extract the citations array.
+   400→          try {
+   401→            const parsed = JSON.parse(tail) as { sessionId?: string; citations: Citation[]; denied?: boolean }
+   402→            if (parsed.sessionId) setSessionId(parsed.sessionId)
+   403→            if (typeof parsed.denied === 'boolean') denied = parsed.denied
+   404→            setMessages((prev) =>
+   405→              prev.map((m) =>
+   406→                m.id === assistantMsgId ? { ...m, content: fullMessage, citations: parsed.citations, denied, pending: false } : m,
+   407→              ),
+   408→            )
+   409→          } catch {
+   410→            setMessages((prev) => prev.map((m) => (m.id === assistantMsgId ? { ...m, content: fullMessage, denied, pending: false } : m)))
+   411→          }
+   412→          break
+   413→        } else {
+   414→          fullMessage += textChunk
+   415→          buffer = ''
+   416→          setMessages((prev) =>
+   417→            prev.map((m) => (m.id === assistantMsgId ? { ...m, content: fullMessage, denied } : m)),
+   418→          )
+   419→        }
+   420→      }
+   421→      // If the stream ended without a citations footer (LLM error / abort)
+   422→      setMessages((prev) =>
+   423→        prev.map((m) =>
+   424→          m.id === assistantMsgId ? { ...m, content: m.content || '', denied, pending: false } : m,
+   425→        ),
+   426→      )
+   427→      // Refresh admin stats — a new AuditLog row was just written.
+   428→      refreshStats()
+   429→    } catch (e) {
+   430→      const err = `⚠️ ${(e as Error).message}`
+   431→      setMessages((prev) =>
+   432→        prev.map((m) =>
+   433→          m.id === assistantMsgId ? { ...m, content: err, pending: false } : m,
+   434→        ),
+   435→      )
+   436→      toast({ title: 'Chat error', description: (e as Error).message, variant: 'destructive' })
+   437→    } finally {
+   438→      setStreaming(false)
+   439→    }
+   440→  }
+   441→
+   442→  function handleComposerKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+   443→    if (e.key === 'Enter' && !e.shiftKey) {
+   444→      e.preventDefault()
+   445→      handleSend()
+   446→    }
+   447→  }
+   448→
+   449→  // ---------- render ----------
+   450→  const hasAdminRole = currentRoles.includes('all')
+   451→  const tagEntries = stats ? Object.entries(stats.perTag).sort((a, b) => b[1] - a[1]) : []
+   452→
+   453→  return (
+   454→    <div className="min-h-screen flex flex-col bg-background">
+   455→      {/* ---------- header ---------- */}
+   456→      <header className="border-b bg-card sticky top-0 z-30">
+   457→        <div className="px-4 sm:px-6 py-3 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+   458→          <div className="flex items-center gap-3">
+   459→            <div className="size-9 rounded-lg bg-primary text-primary-foreground grid place-items-center">
+   460→              <Search className="size-5" />
+   461→            </div>
+   462→            <div>
+   463→              <h1 className="text-lg font-semibold leading-tight">Internal Wiki AI Search</h1>
+   464→              <p className="text-xs text-muted-foreground leading-tight">
+   465→                RBAC-filtered RAG over the company wiki · safe-mode fallback
+   466→              </p>
+   467→            </div>
+   468→          </div>
+   469→
+   470→          <div className="flex items-center gap-3 flex-wrap">
+   471→            {/* role picker — chip group */}
+   472→            <div className="flex items-center gap-1.5 flex-wrap">
+   473→              <span className="text-xs text-muted-foreground font-medium pr-1">View as:</span>
+   474→              {loadingUsers ? (
+   475→                <Skeleton className="h-6 w-32 rounded-full" />
+   476→              ) : (
+   477→                users.map((u) => {
+   478→                  const role = u.roles[0] ?? 'public'
+   479→                  const active = u.id === currentUserId
+   480→                  return (
+   481→                    <button
+   482→                      key={u.id}
+   483→                      type="button"
+   484→                      onClick={() => setCurrentUserId(u.id)}
+   485→                      className={roleChipCls(role, active)}
+   486→                      title={`${u.name} · ${u.email} · roles: ${u.roles.join(', ')}`}
+   487→                    >
+   488→                      <UserCircle2 className="size-3 inline mr-1" />
+   489→                      {u.name} <span className="opacity-70">[{u.roles.join(',')}]</span>
+   490→                    </button>
+   491→                  )
+   492→                })
+   493→              )}
+   494→              <Button
+   495→                variant="ghost"
+   496→                size="sm"
+   497→                className="h-6 px-2 text-xs"
+   498→                onClick={() => setCreateUserOpen(true)}
+   499→                title="Add a mock user with roles (admin action)"
+   500→              >
+   501→                <Plus className="size-3" /> User
+   502→              </Button>
+   503→            </div>
+   504→
+   505→            {/* right-panel tabs */}
+   506→            <Tabs value={rightTab} onValueChange={(v) => setRightTab(v as 'chat' | 'admin')}>
+   507→              <TabsList className="h-7">
+   508→                <TabsTrigger value="chat" className="text-xs px-2 py-0.5"><Sparkles className="size-3 mr-1" /> Chat</TabsTrigger>
+   509→                <TabsTrigger value="admin" className="text-xs px-2 py-0.5"><LayoutDashboard className="size-3 mr-1" /> Admin</TabsTrigger>
+   510→              </TabsList>
+   511→            </Tabs>
+   512→          </div>
+   513→        </div>
+   514→      </header>
+   515→
+   516→      {/* ---------- 3-column body ---------- */}
+   517→      <main className="flex-1 grid grid-cols-1 lg:grid-cols-[300px_1fr_360px] xl:grid-cols-[340px_1fr_400px] gap-0 lg:gap-px bg-border/40">
+   518→        {/* LEFT — wiki page list */}
+   519→        <aside className="bg-card border-r border-border overflow-hidden flex flex-col">
+   520→          <div className="p-4 border-b flex items-center justify-between">
+   521→            <div>
+   522→              <h2 className="text-sm font-semibold flex items-center gap-2"><FileText className="size-4" /> Wiki Pages</h2>
+   523→              <p className="text-xs text-muted-foreground mt-0.5">
+   524→                {pages.length} page(s) visible to <span className="font-medium">{currentUser?.name ?? '…'}</span>
+   525→              </p>
+   526→            </div>
+   527→            <Button size="sm" onClick={() => setAddPageOpen(true)}>
+   528→              <Plus className="size-4" /> Add
+   529→            </Button>
+   530→          </div>
+   531→          <ScrollArea className="flex-1">
+   532→            <div className="p-3 space-y-2 max-h-[calc(100vh-200px)]">
+   533→              {loadingPages ? (
+   534→                Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-20 w-full" />)
+   535→              ) : pages.length === 0 ? (
+   536→                <div className="text-center py-10 text-xs text-muted-foreground">
+   537→                  <BookOpen className="size-6 mx-auto mb-2 opacity-40" />
+   538→                  No pages visible to this user.
+   539→                  <br />
+   540→                  Click <span className="font-medium">Add</span> to ingest a wiki page.
+   541→                </div>
+   542→              ) : (
+   543→                pages.map((p) => {
+   544→                  const sb = SOURCE_BADGE[p.source] ?? SOURCE_BADGE['markdown-upload']
+   545→                  return (
+   546→                    <Card key={p.id} className="gap-2 py-3 px-3 shadow-none hover:shadow-sm transition-shadow">
+   547→                      <div className="flex items-start justify-between gap-2">
+   548→                        <div className="min-w-0 flex-1">
+   549→                          <div className="flex items-center gap-1.5 mb-1">
+   550→                            <Badge variant="outline" className={`text-[10px] px-1.5 py-0 ${sb.cls}`}>{sb.label}</Badge>
+   551→                            <span className="text-xs text-muted-foreground">{p._count.chunks} chunks</span>
+   552→                          </div>
+   553→                          <h3 className="text-sm font-medium truncate" title={p.title}>{p.title}</h3>
+   554→                          <div className="flex flex-wrap gap-1 mt-1.5">
+   555→                            {p.accessTags.length === 0 ? (
+   556→                              <Badge variant="outline" className="text-[10px] px-1.5 py-0 bg-emerald-50 text-emerald-800 border-emerald-200">public</Badge>
+   557→                            ) : (
+   558→                              p.accessTags.map((t) => (
+   559→                                <Badge key={t} variant="outline" className={`text-[10px] px-1.5 py-0 ${ROLE_COLORS[t] ?? ''}`}>
+   560→                                  {t}
+   561→                                </Badge>
+   562→                              ))
+   563→                            )}
+   564→                          </div>
+   565→                          {p.url && (
+   566→                            <a
+   567→                              href={p.url}
+   568→                              target="_blank"
+   569→                              rel="noreferrer"
+   570→                              className="text-[11px] text-primary hover:underline mt-1 inline-flex items-center gap-0.5"
+   571→                            >
+   572→                              <ExternalLink className="size-3" /> source
+   573→                            </a>
+   574→                          )}
+   575→                        </div>
+   576→                        <Button
+   577→                          variant="ghost"
+   578→                          size="icon"
+   579→                          className="size-7 text-muted-foreground hover:text-destructive"
+   580→                          onClick={() => handleDeletePage(p.id, p.title)}
+   581→                          title="Delete page"
+   582→                        >
+   583→                          <Trash2 className="size-3.5" />
+   584→                        </Button>
+   585→                      </div>
+   586→                    </Card>
+   587→                  )
+   588→                })
+   589→              )}
+   590→            </div>
+   591→          </ScrollArea>
+   592→        </aside>
+   593→
+   594→        {/* CENTER — chat column */}
+   595→        <section className="bg-card overflow-hidden flex flex-col min-h-[60vh] lg:min-h-0">
+   596→          <div className="p-4 border-b flex items-center justify-between">
+   597→            <div>
+   598→              <h2 className="text-sm font-semibold flex items-center gap-2"><Sparkles className="size-4" /> Ask the Wiki</h2>
+   599→              <p className="text-xs text-muted-foreground mt-0.5">
+   600→                Answers grounded in <span className="font-medium">{pages.length}</span> visible page(s) ·
+   601→                role: <span className="font-medium">{currentRoles.join(', ') || 'none'}</span>
+   602→              </p>
+   603→            </div>
+   604→            {messages.length > 0 && (
+   605→              <Button variant="ghost" size="sm" onClick={() => { setMessages([]); setSessionId(null) }}>
+   606→                Clear
+   607→              </Button>
+   608→            )}
+   609→          </div>
+   610→
+   611→          <div ref={chatScrollRef} className="flex-1 overflow-y-auto p-4 space-y-4 max-h-[calc(100vh-300px)] lg:max-h-none">
+   612→            {messages.length === 0 ? (
+   613→              <div className="text-center py-12">
+   614→                <div className="size-12 rounded-full bg-primary/10 grid place-items-center mx-auto mb-3">
+   615→                  <Search className="size-6 text-primary" />
+   616→                </div>
+   617→                <p className="text-sm font-medium mb-1">Ask a question about the wiki</p>
+   618→                <p className="text-xs text-muted-foreground max-w-md mx-auto">
+   619→                  The assistant only sees wiki content that matches your role's access tags.
+   620→                  If nothing relevant is visible, it returns the safe-mode message — never fabricates.
+   621→                </p>
+   622→              </div>
+   623→            ) : (
+   624→              messages.map((m) => (
+   625→                <div key={m.id} className={`flex gap-3 ${m.role === 'user' ? 'justify-end' : ''}`}>
+   626→                  {m.role === 'assistant' && (
+   627→                    <div className="size-7 rounded-full bg-primary text-primary-foreground grid place-items-center shrink-0 text-xs font-semibold">
+   628→                      {m.denied ? <ShieldAlert className="size-4" /> : <Sparkles className="size-4" />}
+   629→                    </div>
+   630→                  )}
+   631→                  <div
+   632→                    className={`max-w-[85%] rounded-lg px-3 py-2 text-sm leading-relaxed whitespace-pre-wrap break-words ${
+   633→                      m.role === 'user'
+   634→                        ? 'bg-primary text-primary-foreground'
+   635→                        : m.denied
+   636→                        ? 'bg-amber-50 border border-amber-200 text-amber-900'
+   637→                        : 'bg-muted'
+   638→                    }`}
+   639→                  >
+   640→                    {m.pending && !m.content ? (
+   641→                      <span className="inline-flex items-center gap-1 text-muted-foreground"><Loader2 className="size-3 animate-spin" /> thinking…</span>
+   642→                    ) : m.denied ? (
+   643→                      <span>{m.content}</span>
+   644→                    ) : m.role === 'assistant' ? (
+   645→                      renderCitationsInline(m.content)
+   646→                    ) : (
+   647→                      m.content
+   648→                    )}
+   649→                    {m.role === 'assistant' && !m.pending && m.citations.length > 0 && (
+   650→                      <div className="mt-3 pt-2 border-t border-border/60 space-y-1.5">
+   651→                        <p className="text-[11px] text-muted-foreground uppercase tracking-wider font-semibold flex items-center gap-1">
+   652→                          <ShieldCheck className="size-3" /> Citations ({m.citations.length})
+   653→                        </p>
+   654→                        {m.citations.map((c, i) => {
+   655→                          const sb = SOURCE_BADGE[c.pageSource] ?? SOURCE_BADGE['markdown-upload']
+   656→                          return (
+   657→                            <div key={c.chunkId} id={`cite-c${i + 1}`} className="text-[11px] rounded border border-border bg-background/60 p-2">
+   658→                              <div className="flex items-center gap-1 mb-0.5 flex-wrap">
+   659→                                <Badge variant="outline" className={`text-[10px] px-1.5 py-0 ${sb.cls}`}>{sb.label}</Badge>
+   660→                                <span className="font-medium">{c.pageTitle}</span>
+   661→                                {c.pageUrl && (
+   662→                                  <a href={c.pageUrl} target="_blank" rel="noreferrer" className="text-primary hover:underline">
+   663→                                    <ExternalLink className="size-3 inline" />
+   664→                                  </a>
+   665→                                )}
+   666→                              </div>
+   667→                              <p className="text-muted-foreground line-clamp-2 leading-snug">{c.preview}…</p>
+   668→                              <div className="flex flex-wrap gap-1 mt-1">
+   669→                                {c.accessTags.length === 0 ? (
+   670→                                  <Badge variant="outline" className="text-[10px] px-1.5 py-0 bg-emerald-50 text-emerald-800 border-emerald-200">public</Badge>
+   671→                                ) : (
+   672→                                  c.accessTags.map((t) => (
+   673→                                    <Badge key={t} variant="outline" className={`text-[10px] px-1.5 py-0 ${ROLE_COLORS[t] ?? ''}`}>{t}</Badge>
+   674→                                  ))
+   675→                                )}
+   676→                              </div>
+   677→                            </div>
+   678→                          )
+   679→                        })}
+   680→                      </div>
+   681→                    )}
+   682→                  </div>
+   683→                </div>
+   684→              ))
+   685→            )}
+   686→          </div>
+   687→
+   688→          <div className="p-3 border-t bg-background">
+   689→            <div className="flex items-end gap-2">
+   690→              <Textarea
+   691→                value={composer}
+   692→                onChange={(e) => setComposer(e.target.value)}
+   693→                onKeyDown={handleComposerKeyDown}
+   694→                placeholder={
+   695→                  currentUserId
+   696→                    ? 'Ask "What is our refund policy?" — Enter to send, Shift+Enter for newline'
+   697→                    : 'Select a user (role) above to start asking…'
+   698→                }
+   699→                disabled={!currentUserId || streaming}
+   700→                className="min-h-12 max-h-48 resize-none text-sm"
+   701→              />
+   702→              <Button onClick={handleSend} disabled={!currentUserId || streaming || !composer.trim()} size="default">
+   703→                {streaming ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
+   704→                <span className="hidden sm:inline">Send</span>
+   705→              </Button>
+   706→            </div>
+   707→            <p className="text-[11px] text-muted-foreground mt-1.5 flex items-center gap-1">
+   708→              <CornerDownLeft className="size-3" /> Enter to send · grounded in your role's view · never fabricates
+   709→            </p>
+   710→          </div>
+   711→        </section>
+   712→
+   713→        {/* RIGHT — admin dashboard */}
+   714→        <aside className="bg-card border-l border-border overflow-hidden flex flex-col">
+   715→          <Tabs value={rightTab} onValueChange={(v) => setRightTab(v as 'chat' | 'admin')} className="flex-1 flex flex-col">
+   716→            <TabsList className="grid grid-cols-2 m-2">
+   717→              <TabsTrigger value="chat" className="text-xs"><Sparkles className="size-3 mr-1" /> Chat</TabsTrigger>
+   718→              <TabsTrigger value="admin" className="text-xs"><LayoutDashboard className="size-3 mr-1" /> Admin</TabsTrigger>
+   719→            </TabsList>
+   720→
+   721→            {/* chat panel mirrors the center column for narrow viewports */}
+   722→            <TabsContent value="chat" className="flex-1 overflow-hidden m-0 px-2 pb-2">
+   723→              <Card className="shadow-none h-full overflow-hidden">
+   724→                <CardContent className="p-3 text-xs text-muted-foreground space-y-3 h-full overflow-y-auto">
+   725→                  <p className="font-medium text-foreground">How RBAC works here</p>
+   726→                  <p>
+   727→                    Each wiki page carries <code className="bg-muted px-1 rounded">accessTags</code>. Each user carries{' '}
+   728→                    <code className="bg-muted px-1 rounded">roles</code>. A chunk is visible iff:
+   729→                  </p>
+   730→                  <ul className="list-disc pl-4 space-y-1">
+   731→                    <li>chunk has no tags (public), OR</li>
+   732→                    <li>user has the <code className="bg-muted px-1 rounded">all</code> role (admin), OR</li>
+   733→                    <li>chunk tags ∩ user roles ≠ ∅</li>
+   734→                  </ul>
+   735→                  <p>If the retrieval returns 0 chunks after filtering, the assistant returns the safe-mode message instead of calling the LLM.</p>
+   736→                  <Separator />
+   737→                  <p className="font-medium text-foreground">Try this</p>
+   738→                  <ul className="list-disc pl-4 space-y-1">
+   739→                    <li>Switch role from <span className="font-medium">engineering</span> to <span className="font-medium">executive</span> — different pages appear in the left list.</li>
+   740→                    <li>Ask "What is the Q4 revenue plan?" as engineering → safe-mode.</li>
+   741→                    <li>Ask the same as executive → grounded answer with citations.</li>
+   742→                    <li>Open the <span className="font-medium">Admin</span> tab → see "denied" queries logged.</li>
+   743→                  </ul>
+   744→                </CardContent>
+   745→              </Card>
+   746→            </TabsContent>
+   747→
+   748→            <TabsContent value="admin" className="flex-1 overflow-hidden m-0 px-2 pb-2 flex flex-col">
+   749→              <ScrollArea className="flex-1">
+   750→                <div className="space-y-3 p-1">
+   751→                  {/* stats overview */}
+   752→                  <Card className="shadow-none py-3">
+   753→                    <CardHeader className="pb-2">
+   754→                      <CardTitle className="text-sm flex items-center gap-2"><Database className="size-4" /> Corpus Stats</CardTitle>
+   755→                      <CardDescription className="text-xs">Total indexed content</CardDescription>
+   756→                    </CardHeader>
+   757→                    <CardContent className="grid grid-cols-3 gap-2 pt-0">
+   758→                      <Stat label="Users" value={loadingStats ? '…' : stats?.totalUsers ?? 0} />
+   759→                      <Stat label="Pages" value={loadingStats ? '…' : stats?.totalPages ?? 0} />
+   760→                      <Stat label="Chunks" value={loadingStats ? '…' : stats?.totalChunks ?? 0} />
+   761→                    </CardContent>
+   762→                  </Card>
+   763→
+   764→                  {/* per-tag distribution */}
+   765→                  <Card className="shadow-none py-3">
+   766→                    <CardHeader className="pb-2">
+   767→                      <CardTitle className="text-sm flex items-center gap-2"><ShieldCheck className="size-4" /> Per-Tag Chunks</CardTitle>
+   768→                      <CardDescription className="text-xs">Access-tag distribution across chunks</CardDescription>
+   769→                    </CardHeader>
+   770→                    <CardContent className="pt-0 space-y-1.5">
+   771→                      {loadingStats ? (
+   772→                        Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-5 w-full" />)
+   773→                      ) : tagEntries.length === 0 ? (
+   774→                        <p className="text-xs text-muted-foreground py-2">No chunks yet.</p>
+   775→                      ) : (
+   776→                        tagEntries.map(([tag, count]) => {
+   777→                          const max = Math.max(...tagEntries.map((e) => e[1]))
+   778→                          const pct = Math.max(2, Math.round((count / max) * 100))
+   779→                          return (
+   780→                            <div key={tag} className="flex items-center gap-2">
+   781→                              <div className="w-20 text-xs font-medium flex items-center gap-1">
+   782→                                <Badge variant="outline" className={`text-[10px] px-1.5 py-0 ${ROLE_COLORS[tag] ?? ''}`}>{tag}</Badge>
+   783→                              </div>
+   784→                              <div className="flex-1 h-4 rounded bg-muted overflow-hidden">
+   785→                                <div className="h-full bg-primary/70" style={{ width: `${pct}%` }} />
+   786→                              </div>
+   787→                              <span className="text-xs tabular-nums w-8 text-right">{count}</span>
+   788→                            </div>
+   789→                          )
+   790→                        })
+   791→                      )}
+   792→                    </CardContent>
+   793→                  </Card>
+   794→
+   795→                  {/* audit log */}
+   796→                  <Card className="shadow-none py-3">
+   797→                    <CardHeader className="pb-2">
+   798→                      <CardTitle className="text-sm flex items-center gap-2"><History className="size-4" /> Last 10 Queries</CardTitle>
+   799→                      <CardDescription className="text-xs">Audit log — denied queries are flagged</CardDescription>
+   800→                    </CardHeader>
+   801→                    <CardContent className="pt-0 space-y-1.5">
+   802→                      {loadingStats ? (
+   803→                        Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-12 w-full" />)
+   804→                      ) : !stats || stats.last10.length === 0 ? (
+   805→                        <p className="text-xs text-muted-foreground py-2">No queries logged yet.</p>
+   806→                      ) : (
+   807→                        stats.last10.map((a) => {
+   808→                          const u = users.find((x) => x.id === a.userId)
+   809→                          return (
+   810→                            <div
+   811→                              key={a.id}
+   812→                              className={`text-xs rounded border p-2 ${
+   813→                                a.denied
+   814→                                  ? 'border-amber-200 bg-amber-50'
+   815→                                  : 'border-border bg-background'
+   816→                              }`}
+   817→                            >
+   818→                              <div className="flex items-center justify-between gap-1 mb-0.5">
+   819→                                <span className="font-medium truncate">{a.query}</span>
+   820→                                {a.denied ? (
+   821→                                  <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-amber-300 text-amber-800 bg-amber-100 shrink-0">
+   822→                                    <ShieldAlert className="size-2.5 mr-0.5" /> denied
+   823→                                  </Badge>
+   824→                                ) : (
+   825→                                  <Badge variant="outline" className="text-[10px] px-1.5 py-0 shrink-0">
+   826→                                    {a.chunksReturned} chunks
+   827→                                  </Badge>
+   828→                                )}
+   829→                              </div>
+   830→                              <p className="text-[10px] text-muted-foreground">
+   831→                                {u ? `${u.name} [${u.roles.join(',')}]` : a.userId.slice(0, 8)} · {fmtDate(a.createdAt)}
+   832→                              </p>
+   833→                            </div>
+   834→                          )
+   835→                        })
+   836→                      )}
+   837→                    </CardContent>
+   838→                  </Card>
+   839→
+   840→                  {!hasAdminRole && (
+   841→                    <p className="text-[10px] text-muted-foreground px-1">
+   842→                      Tip: switch the role picker to <span className="font-medium">all</span> to see every page.
+   843→                    </p>
+   844→                  )}
+   845→                </div>
+   846→              </ScrollArea>
+   847→            </TabsContent>
+   848→          </Tabs>
+   849→        </aside>
+   850→      </main>
+   851→
+   852→      {/* ---------- footer (sticky) ---------- */}
+   853→      <footer className="border-t bg-card py-2 px-4 text-center text-[11px] text-muted-foreground">
+   854→        Internal Wiki AI Search · MVP single-source (markdown-upload) · stretch goals documented in README
+   855→      </footer>
+   856→
+   857→      {/* ---------- add-page dialog ---------- */}
+   858→      <Dialog open={addPageOpen} onOpenChange={setAddPageOpen}>
+   859→        <DialogContent className="sm:max-w-2xl">
+   860→          <DialogHeader>
+   861→            <DialogTitle>Add wiki page</DialogTitle>
+   862→            <DialogDescription>
+   863→              Paste markdown content. The page is chunked, embedded, and indexed.
+   864→              Access tags control RBAC — comma-separated, e.g. <code>engineering, finance</code>. Leave empty for public.
+   865→            </DialogDescription>
+   866→          </DialogHeader>
+   867→          <div className="grid gap-3">
+   868→            <div className="grid gap-1.5">
+   869→              <Label htmlFor="title">Title</Label>
+   870→              <Input
+   871→                id="title"
+   872→                value={newTitle}
+   873→                onChange={(e) => setNewTitle(e.target.value)}
+   874→                placeholder="Refund Policy (Q4 2025)"
+   875→              />
+   876→            </div>
+   877→            <div className="grid gap-1.5">
+   878→              <Label htmlFor="tags">Access tags (comma-separated)</Label>
+   879→              <Input
+   880→                id="tags"
+   881→                value={newTags}
+   882→                onChange={(e) => setNewTags(e.target.value)}
+   883→                placeholder="engineering, finance, executive"
+   884→              />
+   885→              <p className="text-[11px] text-muted-foreground">
+   886→                Empty = public. Suggested: <code>engineering</code>, <code>finance</code>, <code>executive</code>.
+   887→              </p>
+   888→            </div>
+   889→            <div className="grid gap-1.5">
+   890→              <Label htmlFor="content">Markdown content</Label>
+   891→              <Textarea
+   892→                id="content"
+   893→                value={newContent}
+   894→                onChange={(e) => setNewContent(e.target.value)}
+   895→                placeholder="# Heading&#10;Body text here.&#10;&#10;## Subsection&#10;More text."
+   896→                className="min-h-48 font-mono text-xs"
+   897→              />
+   898→            </div>
+   899→          </div>
+   900→          <DialogFooter>
+   901→            <Button variant="outline" onClick={() => setAddPageOpen(false)} disabled={importing}>Cancel</Button>
+   902→            <Button onClick={handleAddPage} disabled={importing}>
+   903→              {importing ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />} Ingest page
+   904→            </Button>
+   905→          </DialogFooter>
+   906→        </DialogContent>
+   907→      </Dialog>
+   908→
+   909→      {/* ---------- create-user dialog ---------- */}
+   910→      <Dialog open={createUserOpen} onOpenChange={setCreateUserOpen}>
+   911→        <DialogContent className="sm:max-w-md">
+   912→          <DialogHeader>
+   913→            <DialogTitle>Add mock user</DialogTitle>
+   914→            <DialogDescription>
+   915→              Creates a User row with the given roles. Used to demo RBAC switching. (No real auth — admin action only.)
+   916→            </DialogDescription>
+   917→          </DialogHeader>
+   918→          <div className="grid gap-3">
+   919→            <div className="grid gap-1.5">
+   920→              <Label htmlFor="nu-name">Name</Label>
+   921→              <Input id="nu-name" value={newUserName} onChange={(e) => setNewUserName(e.target.value)} placeholder="Jordan Engineer" />
+   922→            </div>
+   923→            <div className="grid gap-1.5">
+   924→              <Label htmlFor="nu-email">Email</Label>
+   925→              <Input id="nu-email" type="email" value={newUserEmail} onChange={(e) => setNewUserEmail(e.target.value)} placeholder="jordan@example.com" />
+   926→            </div>
+   927→            <div className="grid gap-1.5">
+   928→              <Label htmlFor="nu-roles">Roles (comma-separated)</Label>
+   929→              <Input id="nu-roles" value={newUserRoles} onChange={(e) => setNewUserRoles(e.target.value)} placeholder="engineering, all" />
+   930→              <p className="text-[11px] text-muted-foreground">
+   931→                Use <code>all</code> for an admin/superuser.
+   932→              </p>
+   933→            </div>
+   934→          </div>
+   935→          <DialogFooter>
+   936→            <Button variant="outline" onClick={() => setCreateUserOpen(false)} disabled={creatingUser}>Cancel</Button>
+   937→            <Button onClick={handleCreateUser} disabled={creatingUser}>
+   938→              {creatingUser ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />} Create
+   939→            </Button>
+   940→          </DialogFooter>
+   941→        </DialogContent>
+   942→      </Dialog>
+   943→    </div>
+   944→  )
+   945→}
+   946→
+   947→function Stat({ label, value }: { label: string; value: number | string }) {
+   948→  return (
+   949→    <div className="text-center">
+   950→      <div className="text-xl font-semibold tabular-nums">{value}</div>
+   951→      <div className="text-[11px] text-muted-foreground uppercase tracking-wider">{label}</div>
+   952→    </div>
+   953→  )
+   954→}
+   955→

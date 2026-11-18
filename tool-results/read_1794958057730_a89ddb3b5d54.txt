@@ -1,0 +1,1092 @@
+     1→'use client'
+     2→
+     3→import * as React from 'react'
+     4→import { useToast } from '@/hooks/use-toast'
+     5→import { Button } from '@/components/ui/button'
+     6→import { Card } from '@/components/ui/card'
+     7→import { Input } from '@/components/ui/input'
+     8→import { Textarea } from '@/components/ui/textarea'
+     9→import { Badge } from '@/components/ui/badge'
+    10→import { ScrollArea } from '@/components/ui/scroll-area'
+    11→import { Separator } from '@/components/ui/separator'
+    12→import { Checkbox } from '@/components/ui/checkbox'
+    13→import { Skeleton } from '@/components/ui/skeleton'
+    14→import {
+    15→  FileText,
+    16→  Upload,
+    17→  Trash2,
+    18→  Send,
+    19→  Loader2,
+    20→  BookOpen,
+    21→  Sparkles,
+    22→  Filter,
+    23→  X,
+    24→  CornerDownLeft,
+    25→  Network,
+    26→  MessageSquare,
+    27→  Github,
+    28→} from 'lucide-react'
+    29→
+    30→// ---------- types ----------
+    31→interface Note {
+    32→  id: string
+    33→  title: string
+    34→  source: string
+    35→  wordCount: number
+    36→  createdAt: string
+    37→  updatedAt: string
+    38→  _count: { chunks: number }
+    39→}
+    40→interface Citation {
+    41→  chunkId: string
+    42→  noteId: string
+    43→  noteTitle: string
+    44→  ordinal: number
+    45→  heading: string
+    46→  preview: string
+    47→}
+    48→interface ChatMessage {
+    49→  id: string
+    50→  role: 'user' | 'assistant'
+    51→  content: string
+    52→  citations: Citation[]
+    53→  pending?: boolean
+    54→}
+    55→
+    56→interface GraphNode {
+    57→  id: string
+    58→  title: string
+    59→  source: string
+    60→  degree: number
+    61→}
+    62→interface GraphEdge {
+    63→  source: string
+    64→  target: string
+    65→  linkText: string
+    66→}
+    67→interface GraphData {
+    68→  nodes: GraphNode[]
+    69→  edges: GraphEdge[]
+    70→}
+    71→
+    72→// ---------- helpers ----------
+    73→function renderCitationsInline(content: string): React.ReactNode[] {
+    74→  // Replace [^c1] markers with clickable chips linked to the citation block.
+    75→  const parts: React.ReactNode[] = []
+    76→  const re = /\[\^(c\d+)\]/g
+    77→  let last = 0
+    78→  let m: RegExpExecArray | null
+    79→  while ((m = re.exec(content)) !== null) {
+    80→    if (m.index > last) {
+    81→      parts.push(<React.Fragment key={`t-${last}`}>{content.slice(last, m.index)}</React.Fragment>)
+    82→    }
+    83→    const id = m[1]
+    84→    parts.push(
+    85→      <a
+    86→        key={`c-${m.index}`}
+    87→        href={`#cite-${id}`}
+    88→        className="text-primary text-xs align-super mx-0.5 px-1 rounded bg-primary/10 hover:bg-primary/20 no-underline"
+    89→      >
+    90→        [{id}]
+    91→      </a>,
+    92→    )
+    93→    last = m.index + m[0].length
+    94→  }
+    95→  if (last < content.length) {
+    96→    parts.push(<React.Fragment key={`t-${last}`}>{content.slice(last)}</React.Fragment>)
+    97→  }
+    98→  return parts
+    99→}
+   100→
+   101→function fmtDate(s: string): string {
+   102→  const d = new Date(s)
+   103→  return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+   104→}
+   105→
+   106→// ---------- force-directed graph simulation ----------
+   107→// A tiny home-grown force simulation. We run a fixed number of ticks per
+   108→// animation frame and stop when the system cools below a threshold so the
+   109→// CPU doesn't spin forever. Repulsion uses a simplified inverse-square law
+   110→// over all node pairs (O(n^2), fine for a few hundred notes). Edges apply a
+   111→// spring force toward their natural length. A centering force keeps the
+   112→// graph in view.
+   113→
+   114→interface SimNode {
+   115→  id: string
+   116→  x: number
+   117→  y: number
+   118→  vx: number
+   119→  vy: number
+   120→  title: string
+   121→  source: string
+   122→  degree: number
+   123→}
+   124→
+   125→function simulate(
+   126→  nodes: SimNode[],
+   127→  edges: { source: string; target: string }[],
+   128→  opts: {
+   129→    width: number
+   130→    height: number
+   131→    iterations: number
+   132→    repulsion: number
+   133→    spring: number
+   134→    springLength: number
+   135→    centering: number
+   136→    damping: number
+   137→  },
+   138→): SimNode[] {
+   139→  const idToNode = new Map(nodes.map((n) => [n.id, n]))
+   140→  const edgePairs = edges
+   141→    .map((e) => ({ a: idToNode.get(e.source), b: idToNode.get(e.target) }))
+   142→    .filter((e): e is { a: SimNode; b: SimNode } => !!e.a && !!e.b)
+   143→
+   144→  for (let iter = 0; iter < opts.iterations; iter++) {
+   145→    // Repulsion: every pair pushes apart.
+   146→    for (let i = 0; i < nodes.length; i++) {
+   147→      for (let j = i + 1; j < nodes.length; j++) {
+   148→        const a = nodes[i]
+   149→        const b = nodes[j]
+   150→        let dx = a.x - b.x
+   151→        let dy = a.y - b.y
+   152→        let dist2 = dx * dx + dy * dy
+   153→        if (dist2 < 1) {
+   154→          // jitter identical positions
+   155→          dx = (Math.random() - 0.5) * 2
+   156→          dy = (Math.random() - 0.5) * 2
+   157→          dist2 = dx * dx + dy * dy + 1
+   158→        }
+   159→        const dist = Math.sqrt(dist2)
+   160→        const force = opts.repulsion / dist2
+   161→        const fx = (dx / dist) * force
+   162→        const fy = (dy / dist) * force
+   163→        a.vx += fx
+   164→        a.vy += fy
+   165→        b.vx -= fx
+   166→        b.vy -= fy
+   167→      }
+   168→    }
+   169→
+   170→    // Spring attraction along edges.
+   171→    for (const e of edgePairs) {
+   172→      const dx = e.b.x - e.a.x
+   173→      const dy = e.b.y - e.a.y
+   174→      const dist = Math.sqrt(dx * dx + dy * dy) || 1
+   175→      const force = opts.spring * (dist - opts.springLength)
+   176→      const fx = (dx / dist) * force
+   177→      const fy = (dy / dist) * force
+   178→      e.a.vx += fx
+   179→      e.a.vy += fy
+   180→      e.b.vx -= fx
+   181→      e.b.vy -= fy
+   182→    }
+   183→
+   184→    // Centering + integrate with damping.
+   185→    const cx = opts.width / 2
+   186→    const cy = opts.height / 2
+   187→    for (const n of nodes) {
+   188→      n.vx += (cx - n.x) * opts.centering
+   189→      n.vy += (cy - n.y) * opts.centering
+   190→      n.vx *= opts.damping
+   191→      n.vy *= opts.damping
+   192→      n.x += n.vx
+   193→      n.y += n.vy
+   194→      // Hard clamp inside the canvas so nodes don't drift off-screen.
+   195→      n.x = Math.max(20, Math.min(opts.width - 20, n.x))
+   196→      n.y = Math.max(20, Math.min(opts.height - 20, n.y))
+   197→    }
+   198→  }
+   199→
+   200→  return nodes
+   201→}
+   202→
+   203→// ---------- main ----------
+   204→export default function Home() {
+   205→  const { toast } = useToast()
+   206→  const [view, setView] = React.useState<'chat' | 'graph'>('chat')
+   207→  const [notes, setNotes] = React.useState<Note[]>([])
+   208→  const [loadingNotes, setLoadingNotes] = React.useState(true)
+   209→  const [stats, setStats] = React.useState<{ notes: number; chunks: number; links: number }>({ notes: 0, chunks: 0, links: 0 })
+   210→  const [filterNoteIds, setFilterNoteIds] = React.useState<Set<string>>(new Set())
+   211→  const [filterOpen, setFilterOpen] = React.useState(false)
+   212→  const [dragActive, setDragActive] = React.useState(false)
+   213→
+   214→  const [pasteMode, setPasteMode] = React.useState(false)
+   215→  const [pasteTitle, setPasteTitle] = React.useState('')
+   216→  const [pasteContent, setPasteContent] = React.useState('')
+   217→  const [importing, setImporting] = React.useState(false)
+   218→
+   219→  const [messages, setMessages] = React.useState<ChatMessage[]>([])
+   220→  const [input, setInput] = React.useState('')
+   221→  const [streaming, setStreaming] = React.useState(false)
+   222→  const [sessionId, setSessionId] = React.useState<string | null>(null)
+   223→  const fileInputRef = React.useRef<HTMLInputElement>(null)
+   224→
+   225→  const [graphData, setGraphData] = React.useState<GraphData | null>(null)
+   226→  const [graphLoading, setGraphLoading] = React.useState(false)
+   227→
+   228→  const refreshNotes = React.useCallback(async () => {
+   229→    setLoadingNotes(true)
+   230→    try {
+   231→      const res = await fetch('/api/notes', { cache: 'no-store' })
+   232→      const json = await res.json()
+   233→      setNotes(json.notes ?? [])
+   234→      const sres = await fetch('/api/stats', { cache: 'no-store' })
+   235→      setStats(await sres.json())
+   236→    } catch (e) {
+   237→      toast({ title: 'Failed to load notes', description: (e as Error).message, variant: 'destructive' })
+   238→    } finally {
+   239→      setLoadingNotes(false)
+   240→    }
+   241→  }, [toast])
+   242→
+   243→  const refreshGraph = React.useCallback(async () => {
+   244→    setGraphLoading(true)
+   245→    try {
+   246→      const res = await fetch('/api/graph', { cache: 'no-store' })
+   247→      const json = await res.json()
+   248→      setGraphData({ nodes: json.nodes ?? [], edges: json.edges ?? [] })
+   249→    } catch (e) {
+   250→      toast({ title: 'Failed to load graph', description: (e as Error).message, variant: 'destructive' })
+   251→    } finally {
+   252→      setGraphLoading(false)
+   253→    }
+   254→  }, [toast])
+   255→
+   256→  React.useEffect(() => {
+   257→    refreshNotes()
+   258→  }, [refreshNotes])
+   259→
+   260→  React.useEffect(() => {
+   261→    if (view === 'graph') refreshGraph()
+   262→  }, [view, refreshGraph, notes.length])
+   263→
+   264→  // ---------- import handlers ----------
+   265→  async function ingestFiles(files: FileList | File[]) {
+   266→    setImporting(true)
+   267→    try {
+   268→      const fd = new FormData()
+   269→      const arr = Array.from(files)
+   270→      let validCount = 0
+   271→      let skipped: string[] = []
+   272→      for (const f of arr) {
+   273→        if (/\.(md|markdown|txt|pdf)$/i.test(f.name)) {
+   274→          fd.append('files', f)
+   275→          validCount += 1
+   276→        } else {
+   277→          skipped.push(f.name)
+   278→        }
+   279→      }
+   280→      if (skipped.length > 0) {
+   281→        toast({ title: `Skipped ${skipped.length} unsupported file(s)`, description: skipped.join(', '), variant: 'destructive' })
+   282→      }
+   283→      if (!validCount) {
+   284→        toast({ title: 'No .md / .txt / .pdf files dropped', variant: 'destructive' })
+   285→        return
+   286→      }
+   287→      const res = await fetch('/api/notes/import', { method: 'POST', body: fd })
+   288→      const json = await res.json()
+   289→      if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`)
+   290→      const summary = json.results
+   291→        .map((r: { title: string; chunks: number; source: string }) => `${r.title} (${r.chunks})`)
+   292→        .join(', ')
+   293→      toast({
+   294→        title: `Imported ${json.results.length} note${json.results.length === 1 ? '' : 's'}`,
+   295→        description: `Indexed ${json.totalChunks} chunks. ${summary}`,
+   296→      })
+   297→      await refreshNotes()
+   298→    } catch (e) {
+   299→      toast({ title: 'Import failed', description: (e as Error).message, variant: 'destructive' })
+   300→    } finally {
+   301→      setImporting(false)
+   302→    }
+   303→  }
+   304→
+   305→  async function ingestPaste() {
+   306→    if (!pasteContent.trim()) {
+   307→      toast({ title: 'Paste content is empty', variant: 'destructive' })
+   308→      return
+   309→    }
+   310→    setImporting(true)
+   311→    try {
+   312→      const fd = new FormData()
+   313→      fd.append('paste', JSON.stringify({
+   314→        title: pasteTitle.trim() || `Pasted note ${new Date().toISOString().slice(0, 16)}`,
+   315→        content: pasteContent,
+   316→      }))
+   317→      const res = await fetch('/api/notes/import', { method: 'POST', body: fd })
+   318→      const json = await res.json()
+   319→      if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`)
+   320→      toast({ title: 'Note pasted', description: `Indexed ${json.totalChunks} chunks.` })
+   321→      setPasteTitle('')
+   322→      setPasteContent('')
+   323→      setPasteMode(false)
+   324→      await refreshNotes()
+   325→    } catch (e) {
+   326→      toast({ title: 'Paste failed', description: (e as Error).message, variant: 'destructive' })
+   327→    } finally {
+   328→      setImporting(false)
+   329→    }
+   330→  }
+   331→
+   332→  async function deleteNote(id: string, title: string) {
+   333→    if (!confirm(`Delete note "${title}"? Its chunks will be unindexed.`)) return
+   334→    try {
+   335→      const res = await fetch(`/api/notes/${id}`, { method: 'DELETE' })
+   336→      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+   337→      toast({ title: 'Note deleted' })
+   338→      setFilterNoteIds((prev) => {
+   339→        const n = new Set(prev)
+   340→        n.delete(id)
+   341→        return n
+   342→      })
+   343→      await refreshNotes()
+   344→    } catch (e) {
+   345→      toast({ title: 'Delete failed', description: (e as Error).message, variant: 'destructive' })
+   346→    }
+   347→  }
+   348→
+   349→  // ---------- drag & drop ----------
+   350→  function onDragOver(e: React.DragEvent) {
+   351→    e.preventDefault()
+   352→    e.stopPropagation()
+   353→    setDragActive(true)
+   354→  }
+   355→  function onDragLeave(e: React.DragEvent) {
+   356→    e.preventDefault()
+   357→    e.stopPropagation()
+   358→    setDragActive(false)
+   359→  }
+   360→  async function onDrop(e: React.DragEvent) {
+   361→    e.preventDefault()
+   362→    e.stopPropagation()
+   363→    setDragActive(false)
+   364→    if (e.dataTransfer?.files?.length) {
+   365→      await ingestFiles(e.dataTransfer.files)
+   366→    }
+   367→  }
+   368→
+   369→  // ---------- chat ----------
+   370→  async function sendMessage() {
+   371→    const text = input.trim()
+   372→    if (!text || streaming) return
+   373→    setInput('')
+   374→    const userMsg: ChatMessage = { id: `u-${Date.now()}`, role: 'user', content: text, citations: [] }
+   375→    const pendingMsg: ChatMessage = { id: `a-${Date.now()}`, role: 'assistant', content: '', citations: [], pending: true }
+   376→    setMessages((m) => [...m, userMsg, pendingMsg])
+   377→    setStreaming(true)
+   378→
+   379→    try {
+   380→      const res = await fetch('/api/chat', {
+   381→        method: 'POST',
+   382→        headers: { 'Content-Type': 'application/json' },
+   383→        body: JSON.stringify({
+   384→          message: text,
+   385→          sessionId: sessionId,
+   386→          filterNoteIds: filterNoteIds.size ? Array.from(filterNoteIds) : undefined,
+   387→        }),
+   388→      })
+   389→      if (!res.ok || !res.body) {
+   390→        const errText = await res.text().catch(() => 'request failed')
+   391→        throw new Error(errText)
+   392→      }
+   393→      const sid = res.headers.get('X-Session-Id')
+   394→      if (sid) setSessionId(sid)
+   395→
+   396→      const reader = res.body.getReader()
+   397→      const decoder = new TextDecoder()
+   398→      let buffer = ''
+   399→      let assistantText = ''
+   400→      let footerParsed: { sessionId?: string; citations: Citation[] } | null = null
+   401→
+   402→      while (true) {
+   403→        const { done, value } = await reader.read()
+   404→        if (done) break
+   405→        buffer += decoder.decode(value, { stream: true })
+   406→
+   407→        const sepIdx = buffer.indexOf('\n\n---CITATIONS---\n')
+   408→        let body = buffer
+   409→        if (sepIdx !== -1) {
+   410→          body = buffer.slice(0, sepIdx)
+   411→          const footerRaw = buffer.slice(sepIdx + '\n\n---CITATIONS---\n'.length)
+   412→          try {
+   413→            footerParsed = JSON.parse(footerRaw)
+   414→            if (footerParsed?.sessionId) setSessionId(footerParsed.sessionId)
+   415→          } catch {
+   416→            footerParsed = { citations: [] }
+   417→          }
+   418→        }
+   419→        if (body !== assistantText) {
+   420→          assistantText = body
+   421→          setMessages((m) =>
+   422→            m.map((msg) => (msg.id === pendingMsg.id ? { ...msg, content: assistantText } : msg))
+   423→          )
+   424→        }
+   425→      }
+   426→      setMessages((m) =>
+   427→        m.map((msg) =>
+   428→          msg.id === pendingMsg.id
+   429→            ? {
+   430→                ...msg,
+   431→                pending: false,
+   432→                content: assistantText,
+   433→                citations: footerParsed?.citations ?? [],
+   434→              }
+   435→            : msg
+   436→        )
+   437→      )
+   438→    } catch (e) {
+   439→      setMessages((m) =>
+   440→        m.map((msg) =>
+   441→          msg.id === pendingMsg.id
+   442→            ? { ...msg, pending: false, content: `⚠️ ${(e as Error).message}` }
+   443→            : msg
+   444→        )
+   445→      )
+   446→      toast({ title: 'Chat error', description: (e as Error).message, variant: 'destructive' })
+   447→    } finally {
+   448→      setStreaming(false)
+   449→    }
+   450→  }
+   451→
+   452→  function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+   453→    if (e.key === 'Enter' && !e.shiftKey) {
+   454→      e.preventDefault()
+   455→      sendMessage()
+   456→    }
+   457→  }
+   458→
+   459→  function onGraphNodeClick(noteId: string) {
+   460→    setFilterNoteIds(new Set([noteId]))
+   461→    setView('chat')
+   462→    toast({ title: 'Filter applied', description: 'Chat now scoped to selected note.' })
+   463→  }
+   464→
+   465→  const activeFilterCount = filterNoteIds.size
+   466→
+   467→  return (
+   468→    <div
+   469→      className="min-h-screen flex flex-col bg-background text-foreground"
+   470→      onDragOver={onDragOver}
+   471→      onDragLeave={onDragLeave}
+   472→      onDrop={onDrop}
+   473→    >
+   474→      {/* Header */}
+   475→      <header className="border-b bg-background/80 backdrop-blur sticky top-0 z-10">
+   476→        <div className="flex items-center justify-between px-4 sm:px-6 py-3 gap-3">
+   477→          <div className="flex items-center gap-3">
+   478→            <div className="size-9 rounded-lg bg-primary/10 grid place-items-center">
+   479→              <BookOpen className="size-5 text-primary" />
+   480→            </div>
+   481→            <div>
+   482→              <h1 className="text-base font-semibold leading-tight">Personal Notes RAG</h1>
+   483→              <p className="text-xs text-muted-foreground">
+   484→                {stats.notes} notes · {stats.chunks} chunks · {stats.links} links
+   485→              </p>
+   486→            </div>
+   487→            {/* Chat | Graph tab toggle */}
+   488→            <div className="ml-3 hidden sm:flex items-center rounded-md border bg-muted/40 p-0.5">
+   489→              <Button
+   490→                variant={view === 'chat' ? 'secondary' : 'ghost'}
+   491→                size="sm"
+   492→                className="h-7"
+   493→                onClick={() => setView('chat')}
+   494→                aria-pressed={view === 'chat'}
+   495→              >
+   496→                <MessageSquare className="size-3.5 mr-1" />
+   497→                Chat
+   498→              </Button>
+   499→              <Button
+   500→                variant={view === 'graph' ? 'secondary' : 'ghost'}
+   501→                size="sm"
+   502→                className="h-7"
+   503→                onClick={() => setView('graph')}
+   504→                aria-pressed={view === 'graph'}
+   505→              >
+   506→                <Network className="size-3.5 mr-1" />
+   507→                Graph
+   508→              </Button>
+   509→            </div>
+   510→          </div>
+   511→          <div className="flex items-center gap-2">
+   512→            <Button variant="outline" size="sm" onClick={() => setPasteMode((v) => !v)}>
+   513→              <FileText className="size-4 mr-1.5" />
+   514→              <span className="hidden sm:inline">Paste note</span>
+   515→            </Button>
+   516→            <Button
+   517→              variant="default"
+   518→              size="sm"
+   519→              onClick={() => fileInputRef.current?.click()}
+   520→              disabled={importing}
+   521→            >
+   522→              {importing ? <Loader2 className="size-4 mr-1.5 animate-spin" /> : <Upload className="size-4 mr-1.5" />}
+   523→              Import
+   524→            </Button>
+   525→            <input
+   526→              ref={fileInputRef}
+   527→              type="file"
+   528→              accept=".md,.markdown,.txt,.pdf"
+   529→              multiple
+   530→              className="hidden"
+   531→              onChange={(e) => {
+   532→                if (e.target.files?.length) ingestFiles(e.target.files)
+   533→                e.target.value = ''
+   534→              }}
+   535→            />
+   536→          </div>
+   537→        </div>
+   538→        {/* mobile tab toggle */}
+   539→        <div className="sm:hidden px-4 pb-2 flex items-center rounded-md border bg-muted/40 p-0.5 mx-4">
+   540→          <Button
+   541→            variant={view === 'chat' ? 'secondary' : 'ghost'}
+   542→            size="sm"
+   543→            className="h-7 flex-1"
+   544→            onClick={() => setView('chat')}
+   545→          >
+   546→            <MessageSquare className="size-3.5 mr-1" />
+   547→            Chat
+   548→          </Button>
+   549→          <Button
+   550→            variant={view === 'graph' ? 'secondary' : 'ghost'}
+   551→            size="sm"
+   552→            className="h-7 flex-1"
+   553→            onClick={() => setView('graph')}
+   554→          >
+   555→            <Network className="size-3.5 mr-1" />
+   556→            Graph
+   557→          </Button>
+   558→        </div>
+   559→        {dragActive && (
+   560→          <div className="absolute inset-0 bg-primary/5 border-2 border-dashed border-primary/40 grid place-items-center pointer-events-none">
+   561→            <div className="flex items-center gap-2 text-primary font-medium">
+   562→              <Upload className="size-5" />
+   563→              Drop .md or .pdf files to import
+   564→            </div>
+   565→          </div>
+   566→        )}
+   567→      </header>
+   568→
+   569→      {/* Main */}
+   570→      {view === 'chat' ? (
+   571→        <main className="flex-1 grid grid-cols-1 md:grid-cols-[280px_1fr] gap-0">
+   572→          {/* Sidebar */}
+   573→          <aside className="border-r bg-muted/30 md:sticky md:top-[57px] md:h-[calc(100vh-57px)] md:overflow-hidden flex flex-col">
+   574→            <div className="p-4 flex items-center justify-between gap-2">
+   575→              <h2 className="text-sm font-semibold">Notes</h2>
+   576→              <Button
+   577→                variant={filterOpen ? 'secondary' : 'ghost'}
+   578→                size="sm"
+   579→                className="h-7 text-xs"
+   580→                onClick={() => setFilterOpen((v) => !v)}
+   581→                disabled={!notes.length}
+   582→              >
+   583→                <Filter className="size-3.5 mr-1" />
+   584→                Filter
+   585→                {activeFilterCount > 0 && (
+   586→                  <Badge variant="secondary" className="ml-1 h-4 px-1 text-[10px]">{activeFilterCount}</Badge>
+   587→                )}
+   588→              </Button>
+   589→            </div>
+   590→            <Separator />
+   591→            {filterOpen && notes.length > 0 && (
+   592→              <div className="p-3 border-b bg-background">
+   593→                <div className="flex items-center justify-between mb-2">
+   594→                  <span className="text-xs text-muted-foreground">Limit search to:</span>
+   595→                  {activeFilterCount > 0 && (
+   596→                    <button
+   597→                      className="text-xs text-primary hover:underline"
+   598→                      onClick={() => setFilterNoteIds(new Set())}
+   599→                    >
+   600→                      Clear ({activeFilterCount})
+   601→                    </button>
+   602→                  )}
+   603→                </div>
+   604→                <div className="max-h-40 overflow-y-auto space-y-1.5 pr-1">
+   605→                  {notes.map((n) => (
+   606→                    <label key={n.id} className="flex items-start gap-2 text-xs cursor-pointer hover:bg-muted/40 rounded p-1">
+   607→                      <Checkbox
+   608→                        checked={filterNoteIds.has(n.id)}
+   609→                        onCheckedChange={(checked) => {
+   610→                          setFilterNoteIds((prev) => {
+   611→                            const next = new Set(prev)
+   612→                            if (checked) next.add(n.id)
+   613→                            else next.delete(n.id)
+   614→                            return next
+   615→                          })
+   616→                        }}
+   617→                        className="mt-0.5"
+   618→                      />
+   619→                      <span className="line-clamp-2">{n.title}</span>
+   620→                    </label>
+   621→                  ))}
+   622→                </div>
+   623→              </div>
+   624→            )}
+   625→            <ScrollArea className="flex-1">
+   626→              <div className="p-2 space-y-1">
+   627→                {loadingNotes ? (
+   628→                  <>
+   629→                    <Skeleton className="h-16 w-full" />
+   630→                    <Skeleton className="h-16 w-full" />
+   631→                    <Skeleton className="h-16 w-full" />
+   632→                  </>
+   633→                ) : notes.length === 0 ? (
+   634→                  <div className="p-4 text-center text-xs text-muted-foreground">
+   635→                    No notes yet. Drag-and-drop <code>.md</code> or <code>.pdf</code> files anywhere in this window, or click <strong>Import</strong>.
+   636→                  </div>
+   637→                ) : (
+   638→                  notes.map((n) => (
+   639→                    <Card key={n.id} className="p-3 hover:bg-muted/40 transition-colors">
+   640→                      <div className="flex items-start justify-between gap-2">
+   641→                        <div className="min-w-0">
+   642→                          <p className="text-sm font-medium line-clamp-2">{n.title}</p>
+   643→                          <p className="text-[11px] text-muted-foreground mt-0.5">
+   644→                            {n._count.chunks} chunks · {n.wordCount} words
+   645→                          </p>
+   646→                          <p className="text-[10px] text-muted-foreground/70 mt-0.5 flex items-center gap-1">
+   647→                            <Badge variant="outline" className="text-[10px] px-1 py-0">{n.source}</Badge>
+   648→                            <span>{fmtDate(n.updatedAt)}</span>
+   649→                          </p>
+   650→                        </div>
+   651→                        <Button
+   652→                          variant="ghost"
+   653→                          size="icon"
+   654→                          className="size-7 -mr-1 -mt-1 text-muted-foreground hover:text-destructive"
+   655→                          onClick={() => deleteNote(n.id, n.title)}
+   656→                          aria-label={`Delete ${n.title}`}
+   657→                        >
+   658→                          <Trash2 className="size-3.5" />
+   659→                        </Button>
+   660→                      </div>
+   661→                    </Card>
+   662→                  ))
+   663→                )}
+   664→              </div>
+   665→            </ScrollArea>
+   666→          </aside>
+   667→
+   668→          {/* Chat column */}
+   669→          <section className="flex flex-col min-h-[60vh] md:h-[calc(100vh-57px)]">
+   670→            {/* Paste modal */}
+   671→            {pasteMode && (
+   672→              <div className="border-b p-4 bg-muted/30">
+   673→                <div className="flex items-center justify-between mb-2">
+   674→                  <h3 className="text-sm font-semibold">Paste a markdown note</h3>
+   675→                  <Button variant="ghost" size="icon" className="size-7" onClick={() => setPasteMode(false)}>
+   676→                    <X className="size-4" />
+   677→                  </Button>
+   678→                </div>
+   679→                <Input
+   680→                  value={pasteTitle}
+   681→                  onChange={(e) => setPasteTitle(e.target.value)}
+   682→                  placeholder="Note title (optional)"
+   683→                  className="mb-2"
+   684→                />
+   685→                <Textarea
+   686→                  value={pasteContent}
+   687→                  onChange={(e) => setPasteContent(e.target.value)}
+   688→                  placeholder="Paste markdown here. Headings (#) create chunk boundaries. Use [[Wiki Links]] to build the graph."
+   689→                  className="min-h-[120px] font-mono text-xs"
+   690→                />
+   691→                <div className="mt-2 flex justify-end gap-2">
+   692→                  <Button variant="ghost" size="sm" onClick={() => setPasteMode(false)}>Cancel</Button>
+   693→                  <Button size="sm" onClick={ingestPaste} disabled={importing}>
+   694→                    {importing ? <Loader2 className="size-4 mr-1.5 animate-spin" /> : <Upload className="size-4 mr-1.5" />}
+   695→                    Save & index
+   696→                  </Button>
+   697→                </div>
+   698→              </div>
+   699→            )}
+   700→
+   701→            {/* Messages */}
+   702→            <ScrollArea className="flex-1">
+   703→              <div className="max-w-3xl mx-auto px-4 py-6 space-y-4">
+   704→                {messages.length === 0 ? (
+   705→                  <EmptyState hasNotes={notes.length > 0} onShowGraph={() => setView('graph')} />
+   706→                ) : (
+   707→                  messages.map((m) => (
+   708→                    <MessageBubble key={m.id} message={m} />
+   709→                  ))
+   710→                )}
+   711→              </div>
+   712→            </ScrollArea>
+   713→
+   714→            {/* Composer */}
+   715→            <div className="border-t bg-background/95 backdrop-blur p-3">
+   716→              <div className="max-w-3xl mx-auto">
+   717→                {activeFilterCount > 0 && (
+   718→                  <div className="text-[11px] text-muted-foreground mb-1.5 flex items-center gap-1.5">
+   719→                    <Filter className="size-3" />
+   720→                    Searching only in {activeFilterCount} selected note{activeFilterCount === 1 ? '' : 's'}.
+   721→                    <button className="text-primary hover:underline" onClick={() => setFilterNoteIds(new Set())}>
+   722→                      Clear
+   723→                    </button>
+   724→                  </div>
+   725→                )}
+   726→                <div className="relative">
+   727→                  <Textarea
+   728→                    value={input}
+   729→                    onChange={(e) => setInput(e.target.value)}
+   730→                    onKeyDown={onKeyDown}
+   731→                    placeholder="Ask anything about your notes… (Enter to send, Shift+Enter for newline)"
+   732→                    className="pr-12 min-h-[44px] max-h-44 resize-y"
+   733→                    disabled={streaming}
+   734→                  />
+   735→                  <Button
+   736→                    size="icon"
+   737→                    className="absolute right-1.5 bottom-1.5 size-8"
+   738→                    onClick={sendMessage}
+   739→                    disabled={streaming || !input.trim()}
+   740→                    aria-label="Send message"
+   741→                  >
+   742→                    {streaming ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
+   743→                  </Button>
+   744→                </div>
+   745→                <div className="text-[10px] text-muted-foreground/70 mt-1 flex items-center gap-1">
+   746→                  <CornerDownLeft className="size-3" /> to send
+   747→                  <span className="mx-1">·</span>
+   748→                  <Sparkles className="size-3" /> RAG with inline [^c1] citations
+   749→                </div>
+   750→              </div>
+   751→            </div>
+   752→          </section>
+   753→        </main>
+   754→      ) : (
+   755→        <GraphView
+   756→          data={graphData}
+   757→          loading={graphLoading}
+   758→          onRefresh={refreshGraph}
+   759→          onNodeClick={onGraphNodeClick}
+   760→        />
+   761→      )}
+   762→    </div>
+   763→  )
+   764→}
+   765→
+   766→// ---------- sub-components ----------
+   767→function MessageBubble({ message }: { message: ChatMessage }) {
+   768→  const isUser = message.role === 'user'
+   769→  return (
+   770→    <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
+   771→      <div className={`max-w-[88%] ${isUser ? 'order-2' : ''}`}>
+   772→        <div
+   773→          className={
+   774→            isUser
+   775→              ? 'rounded-2xl rounded-br-sm bg-primary text-primary-foreground px-4 py-2.5 text-sm whitespace-pre-wrap'
+   776→              : 'rounded-2xl rounded-bl-sm bg-muted px-4 py-2.5 text-sm whitespace-pre-wrap'
+   777→          }
+   778→        >
+   779→          {isUser ? message.content : renderCitationsInline(message.content)}
+   780→          {message.pending && (
+   781→            <span className="inline-flex items-center gap-1 ml-1 text-xs text-muted-foreground">
+   782→              <Loader2 className="size-3 animate-spin" />
+   783→            </span>
+   784→          )}
+   785→        </div>
+   786→        {!isUser && message.citations.length > 0 && !message.pending && (
+   787→          <div className="mt-2 space-y-1.5">
+   788→            <p className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wide">Sources</p>
+   789→            {message.citations.map((c, i) => (
+   790→              <a
+   791→                key={c.chunkId}
+   792→                id={`cite-c${i + 1}`}
+   793→                href="#"
+   794→                className="block text-xs bg-background border rounded-md p-2 hover:border-primary/40 transition-colors no-underline"
+   795→                onClick={(e) => e.preventDefault()}
+   796→              >
+   797→                <div className="flex items-center justify-between gap-2">
+   798→                  <span className="font-medium text-foreground line-clamp-1">{c.noteTitle}</span>
+   799→                  <Badge variant="outline" className="shrink-0 text-[10px] px-1 py-0">c{i + 1}</Badge>
+   800→                </div>
+   801→                {c.heading && (
+   802→                  <p className="text-[11px] text-muted-foreground mt-0.5">{c.heading} · chunk {c.ordinal}</p>
+   803→                )}
+   804→                <p className="text-[11px] text-muted-foreground/80 mt-1 line-clamp-2">{c.preview}</p>
+   805→              </a>
+   806→            ))}
+   807→          </div>
+   808→        )}
+   809→      </div>
+   810→    </div>
+   811→  )
+   812→}
+   813→
+   814→function EmptyState({ hasNotes, onShowGraph }: { hasNotes: boolean; onShowGraph: () => void }) {
+   815→  return (
+   816→    <div className="py-16 text-center max-w-md mx-auto">
+   817→      <div className="size-14 rounded-full bg-primary/10 grid place-items-center mx-auto mb-4">
+   818→        <Sparkles className="size-7 text-primary" />
+   819→      </div>
+   820→      <h2 className="text-lg font-semibold mb-2">Chat with your notes</h2>
+   821→      <p className="text-sm text-muted-foreground">
+   822→        {hasNotes
+   823→          ? 'Ask a question — answers are grounded in your imported notes (markdown + PDF) with inline citations.'
+   824→          : 'Import markdown or PDF notes (drag-and-drop anywhere, or use the Import button) to start chatting. Use [[Wiki Links]] in your markdown to build the graph view.'}
+   825→      </p>
+   826→      {hasNotes && (
+   827→        <Button variant="outline" size="sm" className="mt-4" onClick={onShowGraph}>
+   828→          <Network className="size-4 mr-1.5" />
+   829→          View note graph
+   830→        </Button>
+   831→      )}
+   832→    </div>
+   833→  )
+   834→}
+   835→
+   836→// ---------- graph view ----------
+   837→function GraphView({
+   838→  data,
+   839→  loading,
+   840→  onRefresh,
+   841→  onNodeClick,
+   842→}: {
+   843→  data: GraphData | null
+   844→  loading: boolean
+   845→  onRefresh: () => void
+   846→  onNodeClick: (noteId: string) => void
+   847→}) {
+   848→  const containerRef = React.useRef<HTMLDivElement>(null)
+   849→  const [dims, setDims] = React.useState({ w: 800, h: 600 })
+   850→  const [hovered, setHovered] = React.useState<string | null>(null)
+   851→  const [selected, setSelected] = React.useState<string | null>(null)
+   852→  const [tick, setTick] = React.useState(0) // re-render trigger
+   853→
+   854→  // Track container size for responsive SVG.
+   855→  React.useEffect(() => {
+   856→    if (!containerRef.current) return
+   857→    const el = containerRef.current
+   858→    const update = () => setDims({ w: el.clientWidth, h: Math.max(400, el.clientHeight) })
+   859→    update()
+   860→    const ro = new ResizeObserver(update)
+   861→    ro.observe(el)
+   862→    return () => ro.disconnect()
+   863→  }, [])
+   864→
+   865→  // Run the force simulation whenever data or container size changes.
+   866→  const simRef = React.useRef<SimNode[]>([])
+   867→  React.useEffect(() => {
+   868→    if (!data || !dims.w) return
+   869→    const existing = new Map(simRef.current.map((n) => [n.id, n]))
+   870→    const cx = dims.w / 2
+   871→    const cy = dims.h / 2
+   872→    const nodes: SimNode[] = data.nodes.map((n) => {
+   873→      const prev = existing.get(n.id)
+   874→      if (prev) {
+   875→        return { ...prev, ...n, vx: prev.vx * 0.5, vy: prev.vy * 0.5 }
+   876→      }
+   877→      // Seed on a circle around the centre so the layout doesn't start
+   878→      // collapsed.
+   879→      const angle = Math.random() * Math.PI * 2
+   880→      const radius = Math.min(dims.w, dims.h) * 0.3
+   881→      return {
+   882→        id: n.id,
+   883→        title: n.title,
+   884→        source: n.source,
+   885→        degree: n.degree,
+   886→        x: cx + Math.cos(angle) * radius,
+   887→        y: cy + Math.sin(angle) * radius,
+   888→        vx: 0,
+   889→        vy: 0,
+   890→      }
+   891→    })
+   892→    simRef.current = nodes
+   893→    // Initial settle: simulate more iterations up-front so the graph appears
+   894→    // already laid out on first paint instead of starting as a tight cluster.
+   895→    simulate(nodes, data.edges, {
+   896→      width: dims.w,
+   897→      height: dims.h,
+   898→      iterations: 220,
+   899→      repulsion: 6000,
+   900→      spring: 0.04,
+   901→      springLength: 110,
+   902→      centering: 0.01,
+   903→      damping: 0.7,
+   904→    })
+   905→    setTick((t) => t + 1)
+   906→  }, [data, dims.w, dims.h])
+   907→
+   908→  // Continuous animation — runs the simulation a few ticks per frame so the
+   909→  // graph gently settles instead of jumping to the final layout.
+   910→  React.useEffect(() => {
+   911→    if (!data) return
+   912→    let raf = 0
+   913→    let running = true
+   914→    let cooldown = 60 // frames of gentle animation, then we stop to save CPU
+   915→    const tickFn = () => {
+   916→      if (!running) return
+   917→      if (cooldown > 0) {
+   918→        simulate(simRef.current, data.edges, {
+   919→          width: dims.w,
+   920→          height: dims.h,
+   921→          iterations: 6,
+   922→          repulsion: 6000,
+   923→          spring: 0.04,
+   924→          springLength: 110,
+   925→          centering: 0.01,
+   926→          damping: 0.85,
+   927→        })
+   928→        cooldown -= 1
+   929→        setTick((t) => (t + 1) % 1_000_000)
+   930→      }
+   931→      raf = requestAnimationFrame(tickFn)
+   932→    }
+   933→    raf = requestAnimationFrame(tickFn)
+   934→    return () => {
+   935→      running = false
+   936→      cancelAnimationFrame(raf)
+   937→    }
+   938→  }, [data, dims.w, dims.h])
+   939→
+   940→  const nodes = simRef.current
+   941→  if (loading) {
+   942→    return (
+   943→      <main className="flex-1 grid place-items-center p-8">
+   944→        <div className="flex items-center gap-3 text-muted-foreground">
+   945→          <Loader2 className="size-5 animate-spin" />
+   946→          <span className="text-sm">Loading graph…</span>
+   947→        </div>
+   948→      </main>
+   949→    )
+   950→  }
+   951→  if (!data || data.nodes.length === 0) {
+   952→    return (
+   953→      <main className="flex-1 grid place-items-center p-8">
+   954→        <div className="text-center max-w-md">
+   955→          <div className="size-14 rounded-full bg-primary/10 grid place-items-center mx-auto mb-4">
+   956→            <Network className="size-7 text-primary" />
+   957→          </div>
+   958→          <h2 className="text-lg font-semibold mb-2">No graph yet</h2>
+   959→          <p className="text-sm text-muted-foreground">
+   960→            Import markdown notes containing <code>[[Wiki Links]]</code> to build the graph.
+   961→            Notes that link to each other appear as connected nodes; clicking a node filters the chat to that note.
+   962→          </p>
+   963→          <Button variant="outline" size="sm" className="mt-4" onClick={onRefresh}>
+   964→            Refresh graph
+   965→          </Button>
+   966→        </div>
+   967→      </main>
+   968→    )
+   969→  }
+   970→
+   971→  // Map node id -> position for edge rendering.
+   972→  const pos = new Map(nodes.map((n) => [n.id, n]))
+   973→  const maxDegree = Math.max(1, ...data.nodes.map((n) => n.degree))
+   974→
+   975→  return (
+   976→    <main className="flex-1 flex flex-col p-4 sm:p-6">
+   977→      <div className="flex items-center justify-between mb-3">
+   978→        <div>
+   979→          <h2 className="text-sm font-semibold">Note Link Graph</h2>
+   980→          <p className="text-xs text-muted-foreground">
+   981→            {data.nodes.length} notes · {data.edges.length} links · click a node to filter chat
+   982→          </p>
+   983→        </div>
+   984→        <Button variant="outline" size="sm" onClick={onRefresh}>
+   985→          Refresh
+   986→        </Button>
+   987→      </div>
+   988→      <div ref={containerRef} className="relative flex-1 rounded-xl border bg-card overflow-hidden">
+   989→        <svg
+   990→          width={dims.w}
+   991→          height={dims.h}
+   992→          className="block"
+   993→          aria-label="Wikilink graph"
+   994→          role="img"
+   995→          style={{ display: 'block' }}
+   996→        >
+   997→          {/* Edges */}
+   998→          <g>
+   999→            {data.edges.map((e, i) => {
+  1000→              const a = pos.get(e.source)
+  1001→              const b = pos.get(e.target)
+  1002→              if (!a || !b) return null
+  1003→              const dim = hovered && hovered !== e.source && hovered !== e.target ? 0.15 : 0.5
+  1004→              return (
+  1005→                <line
+  1006→                  key={`e-${i}`}
+  1007→                  x1={a.x}
+  1008→                  y1={a.y}
+  1009→                  x2={b.x}
+  1010→                  y2={b.y}
+  1011→                  stroke="currentColor"
+  1012→                  className="text-muted-foreground"
+  1013→                  strokeOpacity={dim}
+  1014→                  strokeWidth={1}
+  1015→                />
+  1016→              )
+  1017→            })}
+  1018→          </g>
+  1019→          {/* Nodes */}
+  1020→          <g>
+  1021→            {nodes.map((n) => {
+  1022→              const radius = 8 + (n.degree / maxDegree) * 18
+  1023→              const isHover = hovered === n.id
+  1024→              const isSel = selected === n.id
+  1025→              const dim = hovered && hovered !== n.id ? 0.4 : 1
+  1026→              return (
+  1027→                <g
+  1028→                  key={n.id}
+  1029→                  transform={`translate(${n.x},${n.y})`}
+  1030→                  className="cursor-pointer"
+  1031→                  onMouseEnter={() => setHovered(n.id)}
+  1032→                  onMouseLeave={() => setHovered(null)}
+  1033→                  onClick={() => {
+  1034→                    setSelected(n.id)
+  1035→                    onNodeClick(n.id)
+  1036→                  }}
+  1037→                  opacity={dim}
+  1038→                >
+  1039→                  <circle
+  1040→                    r={radius}
+  1041→                    className={
+  1042→                      isSel
+  1043→                        ? 'fill-primary stroke-primary-foreground stroke-2'
+  1044→                        : isHover
+  1045→                        ? 'fill-primary/80 stroke-primary-foreground/60 stroke-1.5'
+  1046→                        : 'fill-primary/70 stroke-background stroke-1.5'
+  1047→                    }
+  1048→                  />
+  1049→                  <text
+  1050→                    y={radius + 12}
+  1051→                    textAnchor="middle"
+  1052→                    className="fill-foreground text-[10px] pointer-events-none select-none"
+  1053→                    style={{ font: '10px var(--font-geist-sans, sans-serif)' }}
+  1054→                  >
+  1055→                    {n.title.length > 28 ? n.title.slice(0, 25) + '…' : n.title}
+  1056→                  </text>
+  1057→                </g>
+  1058→              )
+  1059→            })}
+  1060→          </g>
+  1061→        </svg>
+  1062→        {/* Hint */}
+  1063→        <div className="absolute bottom-2 left-2 right-2 flex items-center justify-between text-[10px] text-muted-foreground/70 pointer-events-none">
+  1064→          <span>Tip: click a node to filter chat · size = degree</span>
+  1065→          <a
+  1066→            href="https://github.com/"
+  1067→            target="_blank"
+  1068→            rel="noreferrer"
+  1069→            className="pointer-events-auto inline-flex items-center gap-1 hover:text-foreground"
+  1070→            onClick={(e) => e.preventDefault()}
+  1071→          >
+  1072→            <Github className="size-3" />
+  1073→            source
+  1074→          </a>
+  1075→        </div>
+  1076→      </div>
+  1077→      {/* Legend */}
+  1078→      <div className="mt-3 flex flex-wrap items-center gap-4 text-[11px] text-muted-foreground">
+  1079→        <span className="flex items-center gap-1.5">
+  1080→          <span className="inline-block size-3 rounded-full bg-primary/70" /> Note
+  1081→        </span>
+  1082→        <span className="flex items-center gap-1.5">
+  1083→          <span className="inline-block w-6 h-px bg-muted-foreground" /> [[wikilink]]
+  1084→        </span>
+  1085→        <span>Node radius scales with the number of links.</span>
+  1086→      </div>
+  1087→      {/* silence unused warning */}
+  1088→      <span className="hidden">{tick}</span>
+  1089→    </main>
+  1090→  )
+  1091→}
+  1092→
